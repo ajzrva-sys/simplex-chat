@@ -1,6 +1,7 @@
 # Feature: create a new profile when choosing a profile for an invitation
 
-Branch `nd/new-profile-for-invitation`, PR #7329. Core + Android/desktop; iOS follows.
+Branch `nd/new-profile-for-invitation`, PR #7329. Core, Android/desktop and iOS —
+the iOS part is unverified, see §7.
 
 > Accept this invitation as someone new.
 
@@ -60,6 +61,13 @@ Rejected alternatives:
 With the flag the sequence reads as the story, with nothing to undo: create (active user
 untouched) → reassign (old profile still active, still owns it) → switch once.
 
+Known, deliberately not fixed: `activateNewUser` is decided from a `readTVarIO`, and
+`deleteChatUser` sets `currentUser` to `Nothing` when the *only visible* profile is
+deleted — so a concurrent delete could leave no active user. It needs deleting your last
+profile while creating one from an invitation picker, which the UI cannot reach, and
+master has the same window with the opposite outcome. Recovering would mean a DB
+write-back for an unreachable state.
+
 `BoolDef` gives `omittedField = False`, so absent = today's behaviour and iOS, the CLI
 and older callers are untouched. `createUserRecordAt` already took an `activeUser :: Bool`;
 the handler was hardcoding `True`. The flag is ignored when there is no active user to
@@ -70,18 +78,23 @@ the active one. Documented at the field; no client decoder changes.
 
 ## 3. Commits
 
+In branch order.
+
 1. **parameterise the create-profile form's submit action** — `CreateProfile` chose
    between two submit paths internally, invisible at its two call sites. The callback
    passes *raw fields*, not a `Profile`: the two paths build different ones
    (no-profile-setup drops `shortDescr`), so a `Profile`-shaped callback would silently
-   change behaviour. Net −6 lines; the `chatModel` parameter was redundant anyway.
-2. **core: `keepActiveUser`** — §2. Also regenerates three client artifacts (§5).
-3. **core: tests** — `keepActiveUser` works; and omitting it still activates (guards an
-   iOS-breaking regression, since iOS never sends the field).
-4. **fix: don't switch profile when the reassignment failed** — pre-existing bug.
+   change behaviour. The branch itself moves to a named `createProfileFromForm` that both
+   existing call sites delegate to — copying it into each would have left two copies to
+   drift. Net +12 lines; the `chatModel` parameter was redundant anyway.
+2. **fix: don't switch profile when the reassignment failed** — pre-existing bug.
    `changeActiveUser_` sat outside the null guards, so a failed reassign still switched
    profile and stranded the invitation. Reachable today. iOS unaffected (its API throws,
    so control flow skips the switch).
+3. **core: `keepActiveUser`** — §2. Also regenerates three client artifacts and
+   hand-syncs two more that no test covers (§5).
+4. **core: tests** — `keepActiveUser` works; and omitting it still activates (guards an
+   iOS-breaking regression, since iOS never sends the field).
 5. **feature: surface 1** — see gotchas.
 6. **feature: surface 2** — extracts `selectProfile` so the new row takes exactly the
    same path as picking an existing profile.
@@ -121,12 +134,21 @@ Uses the existing `users_add` ("Add profile") string — **zero new translation 
   new profile always has the SimpleX Team/Status cards. Core returns the updated contact;
   do not pre-check.
 
-## 5. Generated artifacts — easy to miss
+## 5. Generated and hand-synced artifacts — easy to miss
 
 `NewUser` is a documented API type, and `apiDocsTest` generates **11 files** from those
 definitions (markdown, TypeScript and Python clients). Adding one field changed three of
 them, one line each. `testGenerate` writes the file *then* asserts it matched, so a stale
 artifact fails the test and the run repairs it.
+
+The generator emits `BoolDef` fields as **required** in the client types (unlike `Maybe`,
+which becomes `profile?`/`NotRequired`). So the two client libraries that are kept in sync
+by hand — `simplex-chat-python/api.py` and `simplex-chat-nodejs/api.ts`, both of which
+build a `NewUser` literal listing every bool — stop type-checking until the new field is
+added there too. Neither is generated, so no test catches it; the precedent is
+`a4e3a1ea1`, which added `clientService` to both. (`simplex-chat-client/typescript` has
+its own separate types and is deliberately untouched — it was not updated for
+`clientService` either.)
 
 **Before touching any type in `Simplex.Chat.Types`, run the `Bot API docs` tests.** The
 Haskell compiles fine without them; only that test catches the drift. This was missed for
@@ -167,10 +189,47 @@ Manual matrix (Android + desktop) — the part that actually finds bugs:
 **Every user-visible bug in this feature was found by running the app** — none by
 compilation, the test suite, or ten rounds of review.
 
-## 7. iOS
+## 7. iOS — done, but **never compiled**
 
-Structure mirrors Kotlin. Commit 4 has **no** iOS counterpart (already correct), and the
-positional-argument bug cannot occur. Needs: `NewUser` and `createActiveUser` gain the
-field, an `apiCreateProfileKeepingActive`, the row in `ContextProfilePickerView` and
-`ActiveProfilePicker`, and the same `chatId` auto-open. iOS's picker is **not**
-reverse-laid-out — the row goes first to appear at the top.
+Three commits mirroring 1/5/6. Commit 2 has no iOS counterpart (already correct: the API
+throws, so a failed reassign skips the switch — and the neither-direct-nor-group
+fall-through is unreachable, since `nextConnectPrepared` gates the picker and is false for
+every other case), and the positional-argument bug cannot occur — Swift's `Profile.init`
+requires labels.
+
+Differences from Kotlin, each deliberate:
+
+- **Surface 1's row goes first**, not last: that list is not reverse-laid-out, so
+  emitting first is what puts it at the top. Surface 2's row stays **last** on both
+  platforms — that list is not reversed on either, so last means bottom on both.
+- **`onSubmit` is optional**, not required — it touches no existing call site, which
+  matters more when the change cannot be compiled.
+- Reuses `"Add profile"` (16 locales) and `"Error changing chat profile"` (10) — again
+  zero new translation entries.
+
+Swift-specific traps found while reviewing, all fixed:
+
+- **Two `.sheet` modifiers on one view conflict** in SwiftUI, and both pickers already
+  present `IncognitoHelp` from the root — so the new sheet goes on the picker itself: a
+  descendant of the root, but *not* the row. Rows live in a `LazyVStack`/`List`, which
+  may dispose them and take the presented sheet with them.
+- **Surface 1's picker height is computed from the row count** —
+  `USER_ROW_SIZE * min(MAX_VISIBLE_USER_ROWS, users.count + 1)` — unlike Kotlin's
+  content-sized `heightIn(max = ...)`. Adding a row without making that `+ 2` clips one,
+  and since the list scrolls to `BOTTOM_ANCHOR` on appear, the clipped one is "Add
+  profile" at the top: invisible to exactly the single-profile user this is for.
+- **Trailing-closure syntax binds to the last init parameter**, which for a memberwise
+  init is not necessarily `onSubmit`; both call sites pass `onSubmit:` explicitly.
+- `if creatingProfile { … }` then setting it is a **non-atomic check-and-set**, and reads
+  `@State` off the main actor; both are done inside one `MainActor.run`.
+- **Presenting an alert while a sheet is dismissing swallows it.** The form is dismissed
+  only on the success path, so failures leave it open with the alert over it — which is
+  also what any other failure does.
+- The `onChange(of: selectedProfile)` handler that surface 2 reuses **returns early unless
+  `profileSwitchStatus == .switchingUser`**, so both must be assigned in the same
+  `MainActor.run` before SwiftUI's next update.
+
+⚠ **No Swift toolchain on the machine this was written on**, so none of it is compiled or
+run. First thing to check once it builds: open a prepared chat with **one** profile and
+confirm "Add profile" is visible without scrolling. Given every user-visible bug in the Kotlin work was found by running the app and
+none by review, treat this as unverified until it builds in Xcode.
