@@ -254,7 +254,19 @@ func apiGetActiveUser(ctrl: chat_ctrl? = nil) throws -> User? {
 }
 
 func apiCreateActiveUser(_ p: Profile?, pastTimestamp: Bool = false, ctrl: chat_ctrl? = nil) throws -> User {
-    let r: ChatResponse0 = try chatSendCmdSync(.createActiveUser(profile: p, pastTimestamp: pastTimestamp), ctrl: ctrl)
+    try createUser(p, pastTimestamp: pastTimestamp, keepActiveUser: false, ctrl: ctrl)
+}
+
+/// Creates a profile without making it active, so that a chat prepared under the current
+/// profile stays resolvable - apiChangePreparedContactUser looks the chat up under the
+/// active user, so that user must remain active until the chat is moved.
+/// Returns the created user, which is NOT the active one.
+func apiCreateProfileKeepingActive(_ p: Profile) throws -> User {
+    try createUser(p, pastTimestamp: false, keepActiveUser: true, ctrl: nil)
+}
+
+private func createUser(_ p: Profile?, pastTimestamp: Bool, keepActiveUser: Bool, ctrl: chat_ctrl?) throws -> User {
+    let r: ChatResponse0 = try chatSendCmdSync(.createActiveUser(profile: p, pastTimestamp: pastTimestamp, keepActiveUser: keepActiveUser), ctrl: ctrl)
     if case let .activeUser(user) = r { return user }
     throw r.unexpected
 }
