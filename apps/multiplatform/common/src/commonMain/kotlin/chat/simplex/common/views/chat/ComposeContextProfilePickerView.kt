@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.*
 import chat.simplex.common.model.*
 import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
+import chat.simplex.common.views.CreateProfile
 import chat.simplex.common.views.helpers.*
 import chat.simplex.common.views.newchat.IncognitoOptionImage
 import chat.simplex.common.views.usersettings.IncognitoView
@@ -40,6 +41,10 @@ fun ComposeContextProfilePickerView(
   val incognitoDefault = chatModel.controller.appPrefs.incognito.get()
   val users = chatModel.users.map { it.user }.filter { u -> u.activeUser || !u.hidden }
   val listExpanded = remember { mutableStateOf(false) }
+  // Not rememberSaveable and not scoped to the lazy list item: it is reset by a
+  // coroutine's finally, which never runs if the process dies, and the item is
+  // disposed when scrolled out of view - either would strand it as true.
+  val creatingProfile = remember { mutableStateOf(false) }
 
   val maxHeightInPx = with(LocalDensity.current) { windowHeight().toPx() }
   val isVisible = remember { mutableStateOf(false) }
@@ -108,11 +113,62 @@ fun ComposeContextProfilePickerView(
           viewPwd = null,
           keepingChatId = chat.id
         )
+        // Reopen the chat under the new profile. keepingChatId only preserves its
+        // place in the reloaded list, so without this the switch lands on the chat
+        // list of the new profile rather than the invitation it was chosen for.
+        // The id is unchanged by the reassignment - it is the contact/group id.
+        chatModel.chatId.value = chat.id
         if (chatModel.currentUser.value?.userId != newUser.userId) {
           AlertManager.shared.showAlertMsg(
             generalGetString(MR.strings.switching_profile_error_title),
             String.format(generalGetString(MR.strings.switching_profile_error_message), newUser.chatViewName)
           )
+        }
+      }
+    }
+  }
+
+  // Creates a profile to use for this invitation. The profile is created without
+  // becoming active, because changeProfile below reassigns the prepared chat, and
+  // the API resolves that chat under the *currently active* user - so the profile
+  // that owns the invitation has to stay active until the chat has been moved.
+  fun createProfileForChat() {
+    // Two taps before the modal renders would otherwise stack two modals sharing
+    // one id, after which close() could dismiss the wrong one.
+    if (ModalManager.center.hasModalOpen(ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE)) return
+    ModalManager.center.showModalCloseable(id = ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE) { close ->
+      CreateProfile { displayName, shortDescr, image ->
+        if (creatingProfile.value) return@CreateProfile
+        creatingProfile.value = true
+        withBGApi {
+          try {
+            val profile = Profile(displayName.trim(), "", shortDescr.trim().ifEmpty { null }, image = image)
+            val newUser = chatModel.controller.apiCreateProfileKeepingActive(rhId, profile) ?: return@withBGApi
+            if (newUser.activeUser) {
+              // The core did not honour keepActiveUser and activated the profile - an
+              // older remote host ignoring the unknown field. Reassigning would now
+              // fail, so resync the UI to what the host actually did and report it.
+              chatModel.controller.changeActiveUser(newUser.remoteHostId, newUser.userId, null)
+              // Not switching_profile_error_message: that says the connection was
+              // moved, and on this path it was not.
+              AlertManager.shared.showAlertMsg(generalGetString(MR.strings.error_changing_user))
+              return@withBGApi
+            }
+            // Make the profile visible in the picker even if the reassignment below
+            // fails - changeProfile only refreshes the list when it actually switches.
+            // listUsers throws, and withBGApi does not catch, so a failure here would
+            // abort the flow with no feedback: the refresh is cosmetic, so skip it.
+            runCatching { chatModel.controller.listUsers(rhId) }.getOrNull()?.let { updatedUsers ->
+              chatModel.users.clear()
+              chatModel.users.addAll(updatedUsers)
+            }
+            if (ModalManager.center.isLastModalOpen(ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE)) {
+              close()
+            }
+            changeProfile(newUser)
+          } finally {
+            creatingProfile.value = false
+          }
         }
       }
     }
@@ -229,6 +285,36 @@ fun ComposeContextProfilePickerView(
   }
 
   @Composable
+  fun NewProfileOption() {
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .sizeIn(minHeight = DEFAULT_MIN_SECTION_ITEM_HEIGHT + 8.dp)
+        .clickable(onClick = { createProfileForChat() })
+        .padding(horizontal = DEFAULT_PADDING_HALF, vertical = 4.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Box(Modifier.size(USER_ROW_AVATAR_SIZE), contentAlignment = Alignment.Center) {
+        Icon(
+          painterResource(MR.images.ic_manage_accounts),
+          contentDescription = null,
+          Modifier.size(24.dp),
+          tint = MaterialTheme.colors.primary,
+        )
+      }
+      TextIconSpaced(false)
+      Text(
+        stringResource(MR.strings.users_add),
+        modifier = Modifier.align(Alignment.CenterVertically),
+        color = MaterialTheme.colors.primary,
+      )
+
+      Spacer(Modifier.weight(1f))
+    }
+  }
+
+  @Composable
   fun ProfilePicker() {
     LazyColumnWithScrollBarNoAppBar(
       Modifier
@@ -272,6 +358,18 @@ fun ComposeContextProfilePickerView(
           )
         )
         ProfilePickerUserOption(user)
+      }
+
+      // Emitted last, so with reverseLayout it renders at the top of the expanded
+      // list - furthest from the compose box, with the current selection nearest.
+      item {
+        Divider(
+          Modifier.padding(
+            start = DEFAULT_PADDING_HALF,
+            end = DEFAULT_PADDING_HALF,
+          )
+        )
+        NewProfileOption()
       }
     }
   }
