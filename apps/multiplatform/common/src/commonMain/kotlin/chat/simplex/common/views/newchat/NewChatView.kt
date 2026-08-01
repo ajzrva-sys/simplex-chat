@@ -39,6 +39,7 @@ import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
 import chat.simplex.common.views.chat.item.CIFileViewScope
 import chat.simplex.common.views.chat.topPaddingToContent
+import chat.simplex.common.views.CreateProfile
 import chat.simplex.common.views.helpers.*
 import chat.simplex.common.views.usersettings.*
 import chat.simplex.common.BuildConfigCommon
@@ -293,6 +294,9 @@ fun ActiveProfilePicker(
   showIncognito: Boolean = true
 ) {
   val switchingProfile = remember { mutableStateOf(false) }
+  // Deliberately not rememberSaveable: reset by a coroutine's finally, which does
+  // not run if the process dies, and the row lives in a disposable lazy item.
+  val creatingProfile = remember { mutableStateOf(false) }
   val incognito = remember {
     chatModel.showingInvitation.value?.conn?.incognito ?: controller.appPrefs.incognito.get()
   }
@@ -314,6 +318,111 @@ fun ActiveProfilePicker(
     }
   }
 
+  fun selectProfile(user: User) {
+    switchingProfile.value = true
+    withApi {
+      try {
+        appPreferences.incognito.set(false)
+        var updatedConn: PendingContactConnection? = null;
+
+        if (contactConnection != null) {
+          updatedConn = controller.apiChangeConnectionUser(rhId, contactConnection.pccConnId, user.userId)
+          if (updatedConn != null) {
+            withContext(Dispatchers.Main) {
+              chatModel.chatsContext.updateContactConnection(rhId, updatedConn)
+              updateShownConnection(updatedConn)
+            }
+          }
+        }
+
+        if ((contactConnection != null && updatedConn != null) || contactConnection == null) {
+          controller.changeActiveUser_(
+            rhId = user.remoteHostId,
+            toUserId = user.userId,
+            viewPwd = if (user.hidden) searchTextOrPassword.value else null
+          )
+
+          if (chatModel.currentUser.value?.userId != user.userId) {
+            AlertManager.shared.showAlertMsg(generalGetString(
+              MR.strings.switching_profile_error_title),
+              String.format(generalGetString(MR.strings.switching_profile_error_message), user.chatViewName)
+            )
+          }
+        }
+
+        if (updatedConn != null) {
+          withContext(Dispatchers.Main) {
+            chatModel.chatsContext.updateContactConnection(user.remoteHostId, updatedConn)
+          }
+        }
+
+        close()
+      } finally {
+        switchingProfile.value = false
+      }
+    }
+  }
+
+  // Creates a profile for this invitation without activating it, then routes through
+  // selectProfile so the connection change and the switch cannot drift from the path
+  // taken when an existing profile is picked.
+  fun createProfileForConnection() {
+    // Guards against two taps stacking two modals that share one id.
+    if (ModalManager.center.hasModalOpen(ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE)) return
+    ModalManager.center.showModalCloseable(id = ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE) { closeForm ->
+      CreateProfile { displayName, shortDescr, image ->
+        if (creatingProfile.value) return@CreateProfile
+        creatingProfile.value = true
+        withBGApi {
+          try {
+            val profile = Profile(displayName.trim(), "", shortDescr.trim().ifEmpty { null }, image = image)
+            val newUser = controller.apiCreateProfileKeepingActive(rhId, profile) ?: return@withBGApi
+            if (newUser.activeUser) {
+              // Older remote host ignored keepActiveUser and switched instead - resync
+              // rather than attempting a connection change that would now fail.
+              controller.changeActiveUser(newUser.remoteHostId, newUser.userId, null)
+              // Not switching_profile_error_message: that says the connection was
+              // moved, and on this path it was not.
+              AlertManager.shared.showAlertMsg(generalGetString(MR.strings.error_changing_user))
+              return@withBGApi
+            }
+            // listUsers throws and withBGApi does not catch; the refresh is cosmetic.
+            runCatching { controller.listUsers(rhId) }.getOrNull()?.let { updatedUsers ->
+              chatModel.users.clear()
+              chatModel.users.addAll(updatedUsers)
+            }
+            if (ModalManager.center.isLastModalOpen(ModalViewId.CONTEXT_USER_PICKER_NEW_PROFILE)) {
+              closeForm()
+            }
+            selectProfile(newUser)
+          } finally {
+            creatingProfile.value = false
+          }
+        }
+      }
+    }
+  }
+
+  @Composable
+  fun NewProfileOption() {
+    ProfilePickerOption(
+      title = stringResource(MR.strings.users_add),
+      disabled = switchingProfile.value || creatingProfile.value,
+      selected = false,
+      onSelected = { createProfileForConnection() },
+      image = {
+        Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
+          Icon(
+            painterResource(MR.images.ic_manage_accounts),
+            contentDescription = null,
+            Modifier.size(24.dp),
+            tint = MaterialTheme.colors.primary,
+          )
+        }
+      }
+    )
+  }
+
   @Composable
   fun ProfilePickerUserOption(user: User) {
     val selected = selectedProfile?.userId == user.userId && !incognito
@@ -322,50 +431,7 @@ fun ActiveProfilePicker(
       title = user.chatViewName,
       disabled = switchingProfile.value || selected,
       selected = selected,
-      onSelected = {
-        switchingProfile.value = true
-        withApi {
-          try {
-            appPreferences.incognito.set(false)
-            var updatedConn: PendingContactConnection? = null;
-
-            if (contactConnection != null) {
-              updatedConn = controller.apiChangeConnectionUser(rhId, contactConnection.pccConnId, user.userId)
-              if (updatedConn != null) {
-                withContext(Dispatchers.Main) {
-                  chatModel.chatsContext.updateContactConnection(rhId, updatedConn)
-                  updateShownConnection(updatedConn)
-                }
-              }
-            }
-
-            if ((contactConnection != null && updatedConn != null) || contactConnection == null) {
-              controller.changeActiveUser_(
-                rhId = user.remoteHostId,
-                toUserId = user.userId,
-                viewPwd = if (user.hidden) searchTextOrPassword.value else null
-              )
-
-              if (chatModel.currentUser.value?.userId != user.userId) {
-                AlertManager.shared.showAlertMsg(generalGetString(
-                  MR.strings.switching_profile_error_title),
-                  String.format(generalGetString(MR.strings.switching_profile_error_message), user.chatViewName)
-                )
-              }
-            }
-
-            if (updatedConn != null) {
-              withContext(Dispatchers.Main) {
-                chatModel.chatsContext.updateContactConnection(user.remoteHostId, updatedConn)
-              }
-            }
-
-            close()
-          } finally {
-            switchingProfile.value = false
-          }
-        }
-      },
+      onSelected = { selectProfile(user) },
         image = { ProfileImage(size = 42.dp, image = user.image) },
         badge = user.profile.localBadge
     )
@@ -451,6 +517,15 @@ fun ActiveProfilePicker(
           }
           itemsIndexed(filteredProfiles) { _, p ->
             ProfilePickerUserOption(p)
+          }
+        }
+        // Outside the branch above: inside it, the row would disappear whenever the
+        // active profile is filtered out by the search text. Only offered when there
+        // is a connection to move to the new profile - in the share list there is
+        // nothing for a brand new profile to share into.
+        if (contactConnection != null) {
+          item {
+            NewProfileOption()
           }
         }
         item {
