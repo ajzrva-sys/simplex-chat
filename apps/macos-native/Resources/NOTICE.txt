@@ -1,0 +1,21 @@
+Native Chat
+Copyright © 2026 Native Chat contributors.
+
+Native Chat is a modified work based on SimpleX Chat. Material changes began on
+August 2, 2026, and include an independent native macOS interface, macOS-specific
+features, and separate application packaging.
+
+Native Chat and the SimpleX Chat source code it incorporates are free software:
+you may redistribute and modify them under the terms of the GNU Affero General
+Public License, version 3, as published by the Free Software Foundation.
+
+Native Chat is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for details.
+
+SimpleX Chat portions remain copyright their respective contributors. Native
+Chat is an independent project and is not affiliated with or endorsed by SimpleX
+Chat Ltd. “SimpleX” is used only to describe network compatibility.
+
+The application’s About window contains links to the corresponding source code,
+the complete GNU AGPL v3 text, modification details, and third-party licenses.

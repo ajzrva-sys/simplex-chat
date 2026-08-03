@@ -16,3 +16,18 @@ struct MainWindowCommands: Commands {
         }
     }
 }
+
+struct AboutCommands: Commands {
+    static let windowID = "about-native-chat"
+
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About \(AppIdentity.displayName)") {
+                openWindow(id: Self.windowID)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+}

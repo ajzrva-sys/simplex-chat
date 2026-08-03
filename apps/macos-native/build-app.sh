@@ -7,6 +7,17 @@ CORE_LIB_DIR=${SIMPLEX_CORE_LIB_DIR:-${REPO_ROOT}/apps/multiplatform/release/mai
 OUTPUT_DIR=${NATIVE_CHAT_OUTPUT_DIR:-/private/tmp/native-chat-build}
 APP_DIR=${OUTPUT_DIR}/Native\ Chat.app
 SIGN_IDENTITY=${NATIVE_CHAT_SIGN_IDENTITY:--}
+APP_VERSION=${NATIVE_CHAT_VERSION:-0.2.1}
+APP_BUILD=${NATIVE_CHAT_BUILD_NUMBER:-2}
+SOURCE_REPOSITORY=${NATIVE_CHAT_SOURCE_REPOSITORY:-https://github.com/ajzrva-sys/simplex-chat}
+SOURCE_REVISION=$(git -C ${REPO_ROOT} rev-parse HEAD)
+SOURCE_URL=${SOURCE_REPOSITORY}/tree/${SOURCE_REVISION}
+DEVELOPMENT_BUILD=NO
+
+if [[ -n $(git -C ${REPO_ROOT} status --porcelain) ]]; then
+  SOURCE_URL=${SOURCE_REPOSITORY}/tree/macos-native
+  DEVELOPMENT_BUILD=YES
+fi
 
 if [[ ! -f ${CORE_LIB_DIR}/libsimplex.dylib ]]; then
   print -u2 "SimpleX core libraries not found at ${CORE_LIB_DIR}"
@@ -31,6 +42,12 @@ xcrun swiftc -module-cache-path ${OUTPUT_DIR}/icon-module-cache -framework AppKi
   ${SCRIPT_DIR}/Tools/GenerateAppIcon.swift -o ${OUTPUT_DIR}/generate-native-chat-icon
 ${OUTPUT_DIR}/generate-native-chat-icon ${ICONSET}
 cp ${ICONSET}/icon_512x512@2x.png ${APP_DIR}/Contents/Resources/NativeChat.png
+cp ${REPO_ROOT}/LICENSE ${APP_DIR}/Contents/Resources/AGPL-3.0.txt
+cp ${SCRIPT_DIR}/Resources/NOTICE.txt ${APP_DIR}/Contents/Resources/NOTICE.txt
+cp ${SCRIPT_DIR}/MODIFICATIONS.md ${APP_DIR}/Contents/Resources/MODIFICATIONS.md
+ditto ${REPO_ROOT}/docs/dependencies/licences ${APP_DIR}/Contents/Resources/ThirdPartyLicenses
+/usr/bin/printf 'Corresponding source for this build:\n%s\n\nRevision:\n%s\n' \
+  ${SOURCE_URL} ${SOURCE_REVISION} > ${APP_DIR}/Contents/Resources/SourceCode.txt
 
 plutil -create xml1 ${APP_DIR}/Contents/Info.plist
 plutil -insert CFBundleDevelopmentRegion -string en ${APP_DIR}/Contents/Info.plist
@@ -41,8 +58,8 @@ plutil -insert CFBundleInfoDictionaryVersion -string 6.0 ${APP_DIR}/Contents/Inf
 plutil -insert CFBundleName -string "Native Chat" ${APP_DIR}/Contents/Info.plist
 plutil -insert CFBundleDisplayName -string "Native Chat" ${APP_DIR}/Contents/Info.plist
 plutil -insert CFBundlePackageType -string APPL ${APP_DIR}/Contents/Info.plist
-plutil -insert CFBundleShortVersionString -string 7.0.0 ${APP_DIR}/Contents/Info.plist
-plutil -insert CFBundleVersion -string 1 ${APP_DIR}/Contents/Info.plist
+plutil -insert CFBundleShortVersionString -string ${APP_VERSION} ${APP_DIR}/Contents/Info.plist
+plutil -insert CFBundleVersion -string ${APP_BUILD} ${APP_DIR}/Contents/Info.plist
 plutil -insert LSApplicationCategoryType -string public.app-category.social-networking ${APP_DIR}/Contents/Info.plist
 plutil -insert LSMultipleInstancesProhibited -bool YES ${APP_DIR}/Contents/Info.plist
 plutil -insert LSMinimumSystemVersion -string 14.0 ${APP_DIR}/Contents/Info.plist
@@ -52,6 +69,10 @@ plutil -insert NSPrincipalClass -string NSApplication ${APP_DIR}/Contents/Info.p
 plutil -insert NSCameraUsageDescription -string "Native Chat uses the camera for video calls." ${APP_DIR}/Contents/Info.plist
 plutil -insert NSMicrophoneUsageDescription -string "Native Chat uses the microphone for calls and voice messages." ${APP_DIR}/Contents/Info.plist
 plutil -insert NativeChatKeychainPassphraseStorageEnabled -bool YES ${APP_DIR}/Contents/Info.plist
+plutil -insert NativeChatSourceRepository -string ${SOURCE_REPOSITORY} ${APP_DIR}/Contents/Info.plist
+plutil -insert NativeChatSourceRevision -string ${SOURCE_REVISION} ${APP_DIR}/Contents/Info.plist
+plutil -insert NativeChatSourceURL -string ${SOURCE_URL} ${APP_DIR}/Contents/Info.plist
+plutil -insert NativeChatDevelopmentBuild -bool ${DEVELOPMENT_BUILD} ${APP_DIR}/Contents/Info.plist
 
 xattr -cr ${APP_DIR}
 for library in ${APP_DIR}/Contents/Frameworks/*.dylib; do

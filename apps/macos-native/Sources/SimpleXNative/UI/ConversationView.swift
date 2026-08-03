@@ -1,6 +1,7 @@
 import AppKit
 import QuickLook
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ConversationView: View {
     @ObservedObject var model: AppModel
@@ -23,12 +24,14 @@ struct ConversationView: View {
                 .background(Color(nsColor: .textBackgroundColor))
                 .navigationTitle("")
                 .toolbar { conversationToolbar(chat: chat) }
-                .dropDestination(for: URL.self) { urls, _ in
-                    guard !model.isSendingSelectedChat else { return false }
-                    model.stageAttachments(urls)
-                    composerFocused = true
-                    return !urls.isEmpty
-                } isTargeted: { dropTargeted = $0 }
+                .onDrop(
+                    of: DroppedAttachmentLoader.supportedContentTypes,
+                    isTargeted: $dropTargeted
+                ) { providers in
+                    let accepted = model.stageDroppedAttachments(providers)
+                    if accepted { composerFocused = true }
+                    return accepted
+                }
                 .overlay {
                     if dropTargeted {
                         DropTargetOverlay()

@@ -2,10 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
+REPO_ROOT=${SCRIPT_DIR:h:h}
 IDENTITY=${DEVELOPER_ID_APPLICATION:-}
 OUTPUT_DIR=${NATIVE_CHAT_OUTPUT_DIR:-/private/tmp/native-chat-build}
 APP_DIR=${OUTPUT_DIR}/Native\ Chat.app
 ARCHIVE=${OUTPUT_DIR}/NativeChat.zip
+
+if [[ -n $(git -C ${REPO_ROOT} status --porcelain) ]]; then
+  print -u2 "Commit all source changes before creating a release archive."
+  exit 2
+fi
 
 if [[ -z ${IDENTITY} ]]; then
   print -u2 "Set DEVELOPER_ID_APPLICATION to a Developer ID Application identity."

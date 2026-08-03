@@ -1043,6 +1043,29 @@ final class AppModel: ObservableObject {
         if !failures.isEmpty { attachmentError = failures.joined(separator: "\n") }
     }
 
+    @discardableResult
+    func stageDroppedAttachments(_ providers: [NSItemProvider]) -> Bool {
+        guard !isSendingSelectedChat else {
+            attachmentError = "Wait for the current message to finish sending before changing attachments."
+            return false
+        }
+        return DroppedAttachmentLoader.beginLoading(providers) { [weak self] result in
+            guard let self else { return }
+            guard !self.isSendingSelectedChat else {
+                self.attachmentError = "The dropped files could not be added while a message was sending."
+                return
+            }
+            self.stageAttachments(result.urls)
+            if !result.failures.isEmpty {
+                let stagingFailure = result.failures.joined(separator: "\n")
+                self.attachmentError = [self.attachmentError, stagingFailure]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+            }
+        }
+    }
+
     func stageVoiceRecording(url: URL, duration: TimeInterval) {
         guard !isSendingSelectedChat else { return }
         do {

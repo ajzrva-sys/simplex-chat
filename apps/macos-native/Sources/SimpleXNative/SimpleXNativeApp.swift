@@ -26,6 +26,7 @@ struct SimpleXNativeApp: App {
         .defaultSize(width: 1120, height: 720)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
+            AboutCommands()
             MainWindowCommands()
             SidebarCommands()
             CommandGroup(replacing: .pasteboard) {
@@ -85,6 +86,18 @@ struct SimpleXNativeApp: App {
                 }
             }
         }
+
+        Window("About \(AppIdentity.displayName)", id: AboutCommands.windowID) {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+
+        MenuBarExtra {
+            NativeChatMenuBarMenu(model: model)
+        } label: {
+            NativeChatMenuBarLabel(model: model)
+        }
+        .menuBarExtraStyle(.menu)
 
         Settings {
             NativeSettingsView(model: model, notifications: notifications)

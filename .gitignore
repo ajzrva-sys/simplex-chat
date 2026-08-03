@@ -63,6 +63,7 @@ website/src/link-images/
 website/src/privacy.md
 # Generated files
 website/package/generated*
+/builds/
 
 # Ignore build tool output, e.g. code coverage
 website/.nyc_output/
@@ -86,4 +87,3 @@ website/.cache
 website/test/stubs-layout-cache/_includes/*.js
 apps/android/app/release
 apps/multiplatform/.kotlin/sessions
-
