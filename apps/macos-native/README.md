@@ -1,6 +1,6 @@
-# SimpleX Native for macOS
+# Native Chat for macOS
 
-This is the native SwiftUI/AppKit macOS frontend. It links to the existing desktop SimpleX core and opens the existing desktop database at `~/.local/share/simplex`.
+Native Chat is an independent native SwiftUI/AppKit macOS frontend compatible with the SimpleX network. It links to the existing desktop core and opens the existing desktop database at `~/.local/share/simplex`.
 
 It does not use Compose, change the core protocol, or introduce a second message format.
 
@@ -10,6 +10,6 @@ Build the app after the desktop core libraries have been staged:
 ./build-app.sh
 ```
 
-The resulting application is `/private/tmp/simplex-native-build/SimpleX.app`. Set
-`SIMPLEX_NATIVE_OUTPUT_DIR` to stage it elsewhere. Only one SimpleX frontend may
+The resulting application is `/private/tmp/native-chat-build/Native Chat.app`. Set
+`NATIVE_CHAT_OUTPUT_DIR` to stage it elsewhere. Only one compatible frontend may
 open the desktop database at a time.

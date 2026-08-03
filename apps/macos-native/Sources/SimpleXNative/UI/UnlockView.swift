@@ -13,12 +13,12 @@ struct UnlockView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 64, height: 64)
-                .accessibilityLabel("SimpleX Chat")
+                .accessibilityLabel(AppIdentity.displayName)
 
             VStack(spacing: 8) {
                 Text("Welcome back")
                     .font(.title2.weight(.semibold))
-                Text("Enter your database passphrase to unlock this SimpleX profile.")
+                Text("Enter your database passphrase to unlock your compatible chat profile.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }

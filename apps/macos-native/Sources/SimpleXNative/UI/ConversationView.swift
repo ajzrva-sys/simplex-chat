@@ -47,6 +47,12 @@ struct ConversationView: View {
                     Text("This removes the selected messages from this Mac. It does not delete them for other people.")
                 }
                 .modifier(ConversationAlertsModifier(model: model))
+                .sheet(isPresented: $model.forwardingPresented) {
+                    ForwardMessagesView(model: model, sourceChat: chat)
+                }
+                .sheet(isPresented: $model.chatDetailsPresented) {
+                    ChatDetailsView(model: model, chat: chat)
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Conversation Selected", systemImage: "bubble.left.and.bubble.right")
@@ -87,6 +93,13 @@ struct ConversationView: View {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            Button("Conversation Details", systemImage: "info.circle") {
+                model.chatDetailsPresented = true
+            }
+            .labelStyle(.iconOnly)
+            .help("Conversation Details")
+            .accessibilityLabel("Conversation Details")
+
             if model.isViewingConversationHistory {
                 Button("Jump to Latest", systemImage: "arrow.down.to.line") {
                     model.jumpToLatest()
@@ -109,6 +122,22 @@ struct ConversationView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: model.density.tokens.transcriptGap) {
+                    if model.conversationAnchorMessageID == nil, model.hasOlderMessages {
+                        Button {
+                            model.loadOlderMessages()
+                        } label: {
+                            if model.isLoadingOlderMessages {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Label("Load Earlier Messages", systemImage: "arrow.up.to.line")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.isLoadingOlderMessages)
+                        .help("Load up to 100 earlier messages")
+                        .accessibilityLabel("Load Earlier Messages")
+                    }
                     ForEach(Array(model.messages.enumerated()), id: \.element.id) { index, message in
                         if startsNewDay(at: index), let timestamp = message.timestamp {
                             TranscriptDateHeader(date: timestamp)
@@ -122,6 +151,8 @@ struct ConversationView: View {
                             endsGroup: endsGroup(at: index),
                             openingAttachment: model.isOpeningAttachment(message.id),
                             inlineAudioURL: model.inlineAudioURL(message.id),
+                            inlineImageURL: model.inlineImageURL(message.id),
+                            transferOperation: message.fileID.flatMap(model.fileTransfers.operation),
                             canReply: model.canReply(to: message),
                             canOpenQuote: model.canNavigateConversationHistory
                         ) {
@@ -144,6 +175,14 @@ struct ConversationView: View {
                             model.openAttachment(message)
                         } prepareInlineAudio: {
                             model.prepareInlineAudio(message)
+                        } receiveAttachment: {
+                            model.receiveAttachment(message)
+                        } retryAttachment: {
+                            model.retryAttachmentTransfer(message)
+                        } cancelAttachment: {
+                            model.cancelAttachmentTransfer(message)
+                        } react: { emoji in
+                            model.toggleReaction(emoji, on: message)
                         }
                         .id(message.id)
                     }
@@ -227,8 +266,11 @@ struct ConversationView: View {
                 MessageSelectionBar(
                     count: model.selectedMessageIDs.count,
                     canReply: model.canReplyToSelectedMessage,
+                    canEdit: model.canEditSelectedMessage,
                     canDelete: model.canDeleteSelectedMessages,
                     reply: { model.replyToSelectedMessage() },
+                    edit: model.beginEditingSelectedMessage,
+                    forward: { model.forwardingPresented = true },
                     copy: model.copySelectedMessages,
                     delete: model.requestDeleteSelectedMessages,
                     clear: model.clearMessageSelection
@@ -248,8 +290,18 @@ struct ConversationView: View {
                 Divider()
             }
 
+            if let message = model.editingMessage {
+                EditContextBar(message: message, cancel: model.cancelEditing)
+                Divider()
+            }
+
             if !model.pendingAttachments.isEmpty {
                 AttachmentTray(model: model)
+                Divider()
+            }
+
+            if model.voiceRecorder.state != .idle {
+                VoiceRecordingBar(model: model)
                 Divider()
             }
 
@@ -297,6 +349,17 @@ struct ConversationView: View {
                         }
                     }
 
+                Button {
+                    model.voiceRecorder.start()
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isSendingSelectedChat || model.voiceRecorder.state != .idle)
+                .help("Record Voice Message")
+                .accessibilityLabel("Record Voice Message")
+
                 Button(action: model.sendDraft) {
                     ZStack {
                         Circle()
@@ -326,11 +389,73 @@ struct ConversationView: View {
     }
 }
 
+private struct VoiceRecordingBar: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            switch model.voiceRecorder.state {
+            case .idle:
+                EmptyView()
+            case let .recording(elapsed, level):
+                Image(systemName: "waveform")
+                    .symbolEffect(.variableColor.iterative, value: level)
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+                ProgressView(value: Double(level))
+                    .frame(maxWidth: 160)
+                    .accessibilityLabel("Microphone level")
+                Text(formattedDuration(elapsed))
+                    .font(.body.monospacedDigit())
+                Spacer()
+                Button("Cancel", role: .destructive, action: model.voiceRecorder.cancel)
+                Button("Stop", systemImage: "stop.fill", action: model.voiceRecorder.stop)
+            case let .review(url, duration):
+                Image(systemName: "waveform")
+                    .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Voice Message")
+                    Text(formattedDuration(duration))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Preview") { NSWorkspace.shared.open(url) }
+                Button("Cancel", role: .destructive, action: model.voiceRecorder.cancel)
+                Button("Add to Message") {
+                    model.stageVoiceRecording(url: url, duration: duration)
+                }
+            case let .failed(message):
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                Text(message)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Dismiss", action: model.voiceRecorder.cancel)
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func formattedDuration(_ seconds: TimeInterval) -> String {
+        Duration.seconds(seconds).formatted(.time(pattern: .minuteSecond))
+    }
+}
+
 private struct MessageSelectionBar: View {
     let count: Int
     let canReply: Bool
+    let canEdit: Bool
     let canDelete: Bool
     let reply: () -> Void
+    let edit: () -> Void
+    let forward: () -> Void
     let copy: () -> Void
     let delete: () -> Void
     let clear: () -> Void
@@ -347,6 +472,17 @@ private struct MessageSelectionBar: View {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                 }
                 .accessibilityIdentifier("selection.reply")
+            }
+
+
+            if canEdit {
+                Button(action: edit) {
+                    Label("Edit", systemImage: "pencil")
+                }
+            }
+
+            Button(action: forward) {
+                Label("Forward", systemImage: "arrowshape.turn.up.right")
             }
 
             Button(action: copy) {
@@ -366,6 +502,35 @@ private struct MessageSelectionBar: View {
         .padding(.vertical, 8)
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityElement(children: .contain)
+    }
+}
+
+private struct EditContextBar: View {
+    let message: NativeMessage
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pencil")
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Editing Message")
+                    .font(.caption.weight(.semibold))
+                Text(message.text)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Cancel", systemImage: "xmark", action: cancel)
+                .labelStyle(.iconOnly)
+                .help("Cancel Editing")
+                .accessibilityLabel("Cancel Editing")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -513,6 +678,8 @@ private struct MessageRow: View {
     let endsGroup: Bool
     let openingAttachment: Bool
     let inlineAudioURL: URL?
+    let inlineImageURL: URL?
+    let transferOperation: FileTransferViewModel.Operation?
     let canReply: Bool
     let canOpenQuote: Bool
     let select: () -> Void
@@ -522,6 +689,10 @@ private struct MessageRow: View {
     let openQuote: (NativeQuote) -> Void
     let openAttachment: () -> Void
     let prepareInlineAudio: () -> Void
+    let receiveAttachment: () -> Void
+    let retryAttachment: () -> Void
+    let cancelAttachment: () -> Void
+    let react: (String) -> Void
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -555,6 +726,28 @@ private struct MessageRow: View {
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
 
+                if !message.reactions.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(message.reactions) { reaction in
+                            Button {
+                                react(reaction.emoji)
+                            } label: {
+                                Text("\(reaction.emoji) \(reaction.count)")
+                                    .font(.caption)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        reaction.userReacted ? Color.accentColor.opacity(0.18) : Color(nsColor: .controlBackgroundColor),
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(reaction.emoji), \(reaction.count) reaction\(reaction.count == 1 ? "" : "s")")
+                            .accessibilityHint(reaction.userReacted ? "Remove your reaction" : "Add your reaction")
+                        }
+                    }
+                }
+
                 if endsGroup, let timestamp = message.timestamp {
                     Text(timestamp, format: .dateTime.hour().minute())
                         .font(.caption2)
@@ -582,6 +775,11 @@ private struct MessageRow: View {
                 Button("Reply", action: reply)
                 Divider()
             }
+            Menu("React") {
+                ForEach(["👍", "👎", "😀", "😂", "😢", "❤️", "🚀", "✅"], id: \.self) { emoji in
+                    Button(emoji) { react(emoji) }
+                }
+            }
             Button("Copy", action: copy)
             Button(selected ? "Deselect Message" : "Select Message", action: select)
             if message.deletable {
@@ -598,24 +796,37 @@ private struct MessageRow: View {
             chat: chat,
             openingAttachment: openingAttachment,
             inlineAudioURL: inlineAudioURL,
+            inlineImageURL: inlineImageURL,
+            transferOperation: transferOperation,
             canOpenQuote: canOpenQuote,
             openQuote: openQuote,
             openAttachment: openAttachment,
-            prepareInlineAudio: prepareInlineAudio
+            prepareInlineAudio: prepareInlineAudio,
+            receiveAttachment: receiveAttachment,
+            retryAttachment: retryAttachment,
+            cancelAttachment: cancelAttachment
         )
         .padding(.horizontal, 12)
         .padding(.vertical, density.tokens.messagePadding)
         .background(bubbleBackground, in: bubbleShape)
         .foregroundStyle(message.sent ? Color(nsColor: .selectedControlTextColor) : Color.primary)
-        .overlay {
+        .overlay(alignment: .topTrailing) {
             if selected {
-                bubbleShape
-                    .stroke(Color.accentColor, lineWidth: 2)
-                    .padding(-2)
+                Image(systemName: "checkmark.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.accentColor)
+                    .padding(5)
+                    .accessibilityHidden(true)
             }
         }
         .contentShape(bubbleShape)
-        .onTapGesture(perform: select)
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+                guard modifiers.contains(.command) || modifiers.contains(.shift) else { return }
+                select()
+            }
+        )
         .focusEffectDisabled()
     }
 
@@ -918,10 +1129,15 @@ private struct MessageContentView: View {
     let chat: NativeChat
     let openingAttachment: Bool
     let inlineAudioURL: URL?
+    let inlineImageURL: URL?
+    let transferOperation: FileTransferViewModel.Operation?
     let canOpenQuote: Bool
     let openQuote: (NativeQuote) -> Void
     let openAttachment: () -> Void
     let prepareInlineAudio: () -> Void
+    let receiveAttachment: () -> Void
+    let retryAttachment: () -> Void
+    let cancelAttachment: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -961,6 +1177,18 @@ private struct MessageContentView: View {
                     fileAttachment(name: fileName ?? message.text)
                 }
                 if !message.text.isEmpty, message.text != fileName { messageText }
+            }
+
+            if let transfer = message.fileTransfer,
+               transfer.rawStatus != "sndComplete",
+               transfer.rawStatus != "rcvComplete" {
+                FileTransferStatusView(
+                    transfer: transfer,
+                    operation: transferOperation,
+                    receive: receiveAttachment,
+                    retry: retryAttachment,
+                    cancel: cancelAttachment
+                )
             }
         }
     }
@@ -1159,7 +1387,10 @@ private struct MessageContentView: View {
     @ViewBuilder
     private func mediaPreview(preview: String?, fileName: String, video: Bool) -> some View {
         let previewView = ZStack {
-            if let image = NativeChatParser.image(from: preview) {
+            if !video, let inlineImageURL {
+                NativeLocalImageView(url: inlineImageURL)
+                    .accessibilityIgnoresInvertColors()
+            } else if let image = NativeChatParser.image(from: preview) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
@@ -1186,20 +1417,27 @@ private struct MessageContentView: View {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityLabel("Decrypting Attachment")
+            } else if message.attachmentCanBeReceived {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.largeTitle)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white)
+                    .shadow(radius: 4)
+                    .accessibilityHidden(true)
             }
         }
         .frame(maxWidth: 420, maxHeight: 320)
         .clipShape(RoundedRectangle(cornerRadius: 8))
 
-        if attachmentExists {
+        if attachmentIsActionable {
             Button(action: openAttachment) {
                 previewView
             }
             .buttonStyle(.plain)
             .disabled(openingAttachment)
-            .help("Open \(fileName)")
-            .accessibilityLabel("Open \(fileName)") // [VERIFY] Uses the attachment file name.
-            .accessibilityInputLabels(["Open \(fileName)", "Open Attachment"])
+            .help(message.attachmentCanBeReceived ? "Download and open \(fileName)" : "Open \(fileName)")
+            .accessibilityLabel(message.attachmentCanBeReceived ? "Download and open \(fileName)" : "Open \(fileName)")
+            .accessibilityInputLabels(["Open \(fileName)", "Download Attachment", "Open Attachment"])
         } else {
             previewView
                 .accessibilityLabel(video ? "Video attachment, \(fileName)" : "Image attachment, \(fileName)")
@@ -1208,7 +1446,7 @@ private struct MessageContentView: View {
 
     @ViewBuilder
     private func fileAttachment(name: String) -> some View {
-        if attachmentExists {
+        if attachmentIsActionable {
             Button(action: openAttachment) {
                 Label(name.isEmpty ? "File" : name, systemImage: "doc")
                 if openingAttachment {
@@ -1229,6 +1467,165 @@ private struct MessageContentView: View {
     private var attachmentExists: Bool {
         guard let source = message.fileSource else { return false }
         return FileManager.default.fileExists(atPath: source.sourceURL.path)
+    }
+
+    private var attachmentIsActionable: Bool {
+        attachmentExists || message.fileID != nil
+    }
+}
+
+private struct FileTransferStatusView: View {
+    let transfer: NativeFileTransfer
+    let operation: FileTransferViewModel.Operation?
+    let receive: () -> Void
+    let retry: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if let fraction = transfer.state.fractionCompleted {
+                    ProgressView(value: fraction)
+                        .frame(width: 104)
+                        .accessibilityLabel(transfer.statusLabel ?? "File transfer progress")
+                        .accessibilityValue(Text(fraction, format: .percent.precision(.fractionLength(0))))
+                } else {
+                    Image(systemName: statusSymbol)
+                        .foregroundStyle(statusColor)
+                        .accessibilityHidden(true)
+                }
+
+                Text(operationLabel ?? transfer.statusLabel ?? "File transfer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if operation?.isRunning == true {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel(operationLabel ?? "Updating file transfer")
+                }
+
+                Spacer(minLength: 0)
+
+                actionButtons
+            }
+
+            if let progressLabel {
+                Text(progressLabel)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let errorMessage = operation?.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 2)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        if operation?.isRunning != true {
+            if transfer.canRetry {
+                Button("Retry", action: retry)
+                    .buttonStyle(.link)
+                    .help("Retry file transfer")
+                    .accessibilityLabel("Retry \(attachmentName)") // [VERIFY] Uses the visible attachment name.
+            } else if transfer.canReceive {
+                Button("Download", action: receive)
+                    .buttonStyle(.link)
+                    .help("Download original file")
+                    .accessibilityLabel("Download \(attachmentName)") // [VERIFY] Uses the visible attachment name.
+            }
+
+            if transfer.canCancel {
+                Button("Cancel", role: .destructive, action: cancel)
+                    .buttonStyle(.link)
+                    .help("Stop file transfer")
+                    .accessibilityLabel("Cancel transfer of \(attachmentName)") // [VERIFY] Uses the visible attachment name.
+            }
+        }
+    }
+
+    private var operationLabel: String? {
+        switch operation?.action {
+        case .receiving: "Starting download…"
+        case .retrying: "Retrying download…"
+        case .cancelling: "Cancelling…"
+        case nil: nil
+        }
+    }
+
+    private var attachmentName: String {
+        let name = transfer.fileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "attachment" : name
+    }
+
+    private var progressLabel: String? {
+        guard let completed = transfer.state.bytesTransferred,
+              let total = transfer.state.totalBytes,
+              total > 0 else {
+            return transfer.fileSize.map { $0.formatted(.byteCount(style: .file)) }
+        }
+        return "\(completed.formatted(.byteCount(style: .file))) of \(total.formatted(.byteCount(style: .file)))"
+    }
+
+    private var statusSymbol: String {
+        switch transfer.state {
+        case .failed: "exclamationmark.triangle.fill"
+        case .cancelled: "xmark.circle.fill"
+        case .paused: "pause.circle.fill"
+        case .queued: "arrow.down.circle"
+        case .complete: "checkmark.circle.fill"
+        case .transferring: "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var statusColor: Color {
+        switch transfer.state {
+        case .failed: .red
+        case .cancelled, .paused: .secondary
+        case .queued, .transferring: .accentColor
+        case .complete: .green
+        }
+    }
+}
+
+struct NativeLocalImageView: NSViewRepresentable {
+    let url: URL
+
+    final class Coordinator {
+        var displayedURL: URL?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSImageView {
+        let imageView = NSImageView()
+        imageView.imageFrameStyle = .none
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.imageAlignment = .alignCenter
+        imageView.animates = true
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        updateImage(in: imageView, coordinator: context.coordinator)
+        return imageView
+    }
+
+    func updateNSView(_ imageView: NSImageView, context: Context) {
+        updateImage(in: imageView, coordinator: context.coordinator)
+    }
+
+    private func updateImage(in imageView: NSImageView, coordinator: Coordinator) {
+        guard coordinator.displayedURL != url else { return }
+        coordinator.displayedURL = url
+        imageView.image = NSImage(contentsOf: url)
     }
 }
 

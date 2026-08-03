@@ -91,6 +91,10 @@ import Testing
     #expect(SimpleXCore.markChatReadCommand(chatID: "#9") == "/_read chat #9")
 }
 
+@Test func receivingAFullResolutionAttachmentUsesItsCoreFileIdentity() {
+    #expect(SimpleXCore.receiveFileCommand(fileID: 731) == "/fr 731")
+}
+
 @MainActor
 @Test func openingTheLatestMessagesClearsUnreadOnlyAfterCoreConfirmation() async throws {
     let unreadChat = NativeChat(
@@ -193,7 +197,7 @@ private func messageBodyHeight(_ text: String) -> CGFloat {
 }
 
 @Test func parsesImageMessagePreviewAndFile() throws {
-    let json = #"{"result":{"type":"apiChat","chat":{"chatItems":[{"chatDir":{"type":"directRcv"},"meta":{"itemId":9,"itemText":"A photo","itemTs":"2026-08-02T20:00:00Z","deletable":true},"content":{"type":"rcvMsgContent","msgContent":{"type":"image","text":"A photo","image":"data:image/jpeg;base64,AA=="}},"quotedItem":{"chatDir":{"type":"directSnd"},"itemId":7,"sentAt":"2026-08-02T19:59:00Z","content":{"type":"text","text":"Original message"}},"file":{"fileName":"photo.jpg","fileSource":{"filePath":"photo.jpg","cryptoArgs":{"fileKey":"test-key","fileNonce":"test-nonce"}}}}]}}}"#
+    let json = #"{"result":{"type":"apiChat","chat":{"chatItems":[{"chatDir":{"type":"directRcv"},"meta":{"itemId":9,"itemText":"A photo","itemTs":"2026-08-02T20:00:00Z","deletable":true},"content":{"type":"rcvMsgContent","msgContent":{"type":"image","text":"A photo","image":"data:image/jpeg;base64,AA=="}},"quotedItem":{"chatDir":{"type":"directSnd"},"itemId":7,"sentAt":"2026-08-02T19:59:00Z","content":{"type":"text","text":"Original message"}},"file":{"fileId":731,"fileName":"photo.jpg","fileSize":987654,"fileStatus":{"type":"rcvComplete"},"fileSource":{"filePath":"photo.jpg","cryptoArgs":{"fileKey":"test-key","fileNonce":"test-nonce"}}}}]}}}"#
     let message = try #require(NativeChatParser.messages(from: Data(json.utf8)).first)
     #expect(message.deletable)
     #expect(message.content == .image(
@@ -202,7 +206,111 @@ private func messageBodyHeight(_ text: String) -> CGFloat {
     ))
     #expect(message.fileSource?.sourceURL.lastPathComponent == "photo.jpg")
     #expect(message.fileSource?.cryptoArgs == NativeCryptoFileArgs(fileKey: "test-key", fileNonce: "test-nonce"))
+    #expect(message.fileID == 731)
+    #expect(message.fileSize == 987654)
+    #expect(message.fileStatus == "rcvComplete")
     #expect(message.quotedItem == NativeQuote(messageID: 7, text: "Original message", sent: true, author: nil))
+}
+
+@Test func parsesDownloadableImageWithoutPretendingItsPreviewIsTheOriginal() throws {
+    let json = #"{"result":{"type":"apiChat","chat":{"chatItems":[{"chatDir":{"type":"directRcv"},"meta":{"itemId":10,"itemText":"Full photo"},"content":{"type":"rcvMsgContent","msgContent":{"type":"image","text":"Full photo","image":"data:image/jpeg;base64,AA=="}},"file":{"fileId":812,"fileName":"full-photo.jpg","fileSize":4200000,"fileStatus":{"type":"rcvInvitation"}}}]}}}"#
+
+    let message = try #require(NativeChatParser.messages(from: Data(json.utf8)).first)
+
+    #expect(message.fileSource == nil)
+    #expect(message.fileID == 812)
+    #expect(message.fileStatus == "rcvInvitation")
+    #expect(message.attachmentCanBeReceived)
+}
+
+@MainActor
+@Test func loadedConversationDownloadsAndDisplaysTheOriginalImageBytesAutomatically() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let originalURL = directory.appendingPathComponent("full-resolution.jpg")
+    try writeTestJPEG(to: originalURL)
+    let originalBytes = try Data(contentsOf: originalURL)
+    let source = NativeCryptoFile(filePath: originalURL.path, cryptoArgs: nil)
+    let invitation = NativeMessage(
+        id: 10,
+        text: "Full photo",
+        timestamp: nil,
+        sent: false,
+        author: "Maya",
+        deletable: true,
+        content: .image(preview: "data:image/jpeg;base64,AA==", fileName: originalURL.lastPathComponent),
+        fileID: 812,
+        fileSize: Int64(originalBytes.count),
+        fileStatus: "rcvInvitation"
+    )
+    let completed = NativeMessage(
+        id: invitation.id,
+        text: invitation.text,
+        timestamp: invitation.timestamp,
+        sent: invitation.sent,
+        author: invitation.author,
+        deletable: invitation.deletable,
+        content: invitation.content,
+        fileSource: source,
+        fileID: invitation.fileID,
+        fileSize: invitation.fileSize,
+        fileStatus: "rcvComplete"
+    )
+    let receiveProbe = FileReceiveProbe()
+    let model = AppModel(
+        previewMode: false,
+        loadMessageOperation: { chatID, itemID in
+            #expect(chatID == "@1")
+            #expect(itemID == invitation.id)
+            return completed
+        },
+        receiveFileOperation: { fileID in
+            await receiveProbe.receive(fileID)
+        }
+    )
+    model.selectedChatID = "@1"
+
+    model.applyLoadedMessages([invitation], to: "@1")
+    await receiveProbe.waitUntilReceived()
+    for _ in 0..<1_000 where model.inlineImageURL(invitation.id) == nil {
+        await Task.yield()
+    }
+
+    let displayedURL = try #require(model.inlineImageURL(invitation.id))
+    #expect(await receiveProbe.receivedFileIDs() == [812])
+    #expect(displayedURL.standardizedFileURL == originalURL.standardizedFileURL)
+    #expect(try Data(contentsOf: displayedURL) == originalBytes)
+    #expect(model.messages.first?.fileStatus == "rcvComplete")
+}
+
+@MainActor
+@Test func nativeTranscriptImageViewLoadsOriginalPixelDimensions() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let originalURL = directory.appendingPathComponent("detailed-original.png")
+    try writeDetailedTestImage(to: originalURL)
+    let host = NSHostingView(rootView: NativeLocalImageView(url: originalURL)
+        .frame(width: 420, height: 320))
+    host.frame = NSRect(x: 0, y: 0, width: 420, height: 320)
+    host.layoutSubtreeIfNeeded()
+
+    let imageView = try #require(findImageView(in: host))
+    let representation = try #require(imageView.image?.representations.first)
+    #expect(representation.pixelsWide == 1_024)
+    #expect(representation.pixelsHigh == 768)
+}
+
+@MainActor
+private func findImageView(in view: NSView) -> NSImageView? {
+    if let imageView = view as? NSImageView { return imageView }
+    for subview in view.subviews {
+        if let imageView = findImageView(in: subview) { return imageView }
+    }
+    return nil
 }
 
 @Test func parsesLinkPreviewAsOneClickableVideoCard() throws {
@@ -694,6 +802,11 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
 
     // Then
     #expect(command == "/_get chat @42 around=91 count=0")
+}
+
+@Test func olderHistoryUsesStableBeforePagination() {
+    #expect(SimpleXCore.chatPageBeforeCommand(chatID: "@42", before: 91, count: 100)
+        == "/_get chat @42 before=91 count=100")
 }
 
 @Test func encryptedBytesAreNotMistakenForAPlainJPEG() {
@@ -1820,6 +1933,22 @@ private actor AttachmentOpenProbe {
     }
 }
 
+private actor FileReceiveProbe {
+    private var fileIDs: [Int64] = []
+
+    func receive(_ fileID: Int64) {
+        fileIDs.append(fileID)
+    }
+
+    func waitUntilReceived() async {
+        while fileIDs.isEmpty { await Task.yield() }
+    }
+
+    func receivedFileIDs() -> [Int64] {
+        fileIDs
+    }
+}
+
 private actor DelayedAttachmentOpenFailure {
     private let message: String
     private var requested = false
@@ -1855,6 +1984,37 @@ private func writeTestJPEG(to url: URL) throws {
     let bitmap = try #require(NSBitmapImageRep(data: tiff))
     let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [:]))
     try jpeg.write(to: url)
+}
+
+private func writeDetailedTestImage(to url: URL) throws {
+    let width = 1_024
+    let height = 768
+    let bitmap = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 3,
+        hasAlpha: false,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: width * 3,
+        bitsPerPixel: 24
+    ))
+    guard let bytes = bitmap.bitmapData else {
+        Issue.record("Test bitmap did not expose writable storage")
+        return
+    }
+    for y in 0..<height {
+        for x in 0..<width {
+            let offset = y * bitmap.bytesPerRow + x * 3
+            bytes[offset] = UInt8(truncatingIfNeeded: x &* 31 ^ y &* 17)
+            bytes[offset + 1] = UInt8(truncatingIfNeeded: x &* 13 &+ y &* 29)
+            bytes[offset + 2] = UInt8(truncatingIfNeeded: x &* 7 ^ y &* 37)
+        }
+    }
+    let data = try #require(bitmap.representation(using: .png, properties: [:]))
+    try data.write(to: url)
 }
 
 @MainActor
@@ -2657,7 +2817,7 @@ private func unavailableVersion(of message: NativeMessage) -> NativeMessage {
     // Then: the committed message stays committed, while the UI reports the missing link.
     #expect(model.draft.isEmpty)
     #expect(model.replyingTo == nil)
-    #expect(model.replyContextError == "Your message was sent, but SimpleX could not link it to the original message.")
+    #expect(model.replyContextError == "Your message was sent, but the chat service could not link it to the original message.")
     #expect(model.phase == .ready)
     #expect(!model.isSending)
 }
@@ -2991,7 +3151,7 @@ private func unavailableVersion(of message: NativeMessage) -> NativeMessage {
     #expect(model.pendingAttachments.isEmpty)
     #expect(model.draft.isEmpty)
     #expect(model.replyingTo == nil)
-    #expect(model.replyContextError == "Your message was sent, but SimpleX could not link it to the original message.")
+    #expect(model.replyContextError == "Your message was sent, but the chat service could not link it to the original message.")
     #expect(model.phase == .ready)
     #expect(!model.isSending)
 }
@@ -3927,7 +4087,7 @@ func databasePassphraseKeychainAddsUpdatesLoadsAndDeletes() async throws {
         title: "Alice", body: "New message"
     ))
     #expect(NativeNotificationParser.preview(for: payload, mode: .hidden) == .init(
-        title: "SimpleX Chat", body: "New message"
+        title: AppIdentity.displayName, body: "New message"
     ))
 }
 
@@ -3980,9 +4140,173 @@ func databasePassphraseKeychainAddsUpdatesLoadsAndDeletes() async throws {
 
 @Test func recognizesCoreCommandFailure() {
     let error = Data(#"{"remoteHostId":null,"error":{"type":"chatError","errorType":{"type":"fileSize","filePath":"huge.mov"}}}"#.utf8)
-    #expect(NativeChatParser.commandError(from: error) == "SimpleX could not complete the action (fileSize).")
+    #expect(NativeChatParser.commandError(from: error) == "This attachment is larger than the conversation’s file-size limit.")
+    let oversizedPreview = Data(#"{"error":{"type":"errorStore","storeError":{"type":"largeMsg"}}}"#.utf8)
+    #expect(NativeChatParser.commandError(from: oversizedPreview) == "This message is too large to send. The attachment is still ready so you can try again.")
     let success = Data(#"{"remoteHostId":null,"result":{"type":"cmdOk"}}"#.utf8)
     #expect(NativeChatParser.commandError(from: success) == nil)
+}
+
+@Test func detailedImagePreviewStaysWithinTheCoreMessageBudget() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("native-chat-preview-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let source = directory.appendingPathComponent("detailed.png")
+    try writeDetailedTestImage(to: source)
+
+    let attachment = try PendingAttachment.stage(url: source)
+
+    let preview = try #require(attachment.previewImage)
+    #expect(attachment.kind == .image)
+    #expect(preview.hasPrefix("data:image/"))
+    #expect(preview.count <= PendingAttachment.maximumPreviewCharacterCount)
+    #expect(attachment.url == source.resolvingSymlinksInPath())
+}
+
+@Test func parsesFileTransferProgressIntoTypedByteState() throws {
+    // Arrange
+    let json = #"{"result":{"type":"apiChat","chat":{"chatItems":[{"chatDir":{"type":"directRcv"},"meta":{"itemId":94,"itemText":"Archive"},"content":{"type":"rcvMsgContent","msgContent":{"type":"file","text":""}},"file":{"fileId":33,"fileName":"archive.zip","fileSize":8000000,"fileProtocol":"xftp","fileStatus":{"type":"rcvTransfer","rcvProgress":3,"rcvTotal":8}}}]}}}"#
+
+    // Act
+    let message = try #require(NativeChatParser.messages(from: Data(json.utf8)).first)
+    let transfer = try #require(message.fileTransfer)
+
+    // Assert
+    #expect(transfer.direction == .receiving)
+    #expect(transfer.fileProtocol == .xftp)
+    #expect(transfer.canCancel)
+    #expect(!transfer.canRetry)
+    #expect(transfer.state == .transferring(bytesTransferred: 3_000_000, totalBytes: 8_000_000))
+    #expect(transfer.state.fractionCompleted == 0.375)
+}
+
+@Test func fileTransferStatusMapsActionsWithoutLeakingRawStringsIntoViews() {
+    let invitation = NativeFileTransfer(
+        id: 1,
+        fileName: "photo.jpg",
+        fileSize: 10_000,
+        fileProtocol: .xftp,
+        rawStatus: "rcvInvitation",
+        progressUnits: nil,
+        totalUnits: nil,
+        errorDescription: nil,
+        source: nil
+    )
+    let interrupted = NativeFileTransfer(
+        id: 2,
+        fileName: "photo.jpg",
+        fileSize: 10_000,
+        fileProtocol: .xftp,
+        rawStatus: "rcvAborted",
+        progressUnits: nil,
+        totalUnits: nil,
+        errorDescription: nil,
+        source: nil
+    )
+    let failed = NativeFileTransfer(
+        id: 3,
+        fileName: "photo.jpg",
+        fileSize: 10_000,
+        fileProtocol: .xftp,
+        rawStatus: "rcvError",
+        progressUnits: nil,
+        totalUnits: nil,
+        errorDescription: "relay unavailable",
+        source: nil
+    )
+
+    #expect(invitation.canReceive)
+    #expect(!invitation.canRetry)
+    #expect(interrupted.canReceive)
+    #expect(interrupted.canRetry)
+    #expect(failed.failureDescription == "relay unavailable")
+    #expect(failed.canRetry)
+}
+
+@Test func coreFileTransferCommandsUseExistingProtocolOperations() {
+    #expect(SimpleXCore.receiveFileCommand(fileID: 731) == "/fr 731")
+    #expect(SimpleXCore.cancelFileCommand(fileID: 731) == "/fc 731")
+}
+
+@MainActor
+@Test func fileTransferViewModelRoutesContextAndSuppressesDuplicateActions() async {
+    // Arrange
+    let repository = FileTransferRepositorySpy()
+    let model = FileTransferViewModel(repository: repository)
+    let context = UserContext(userID: 9, remoteHostID: 41)
+
+    // Act: both calls happen before the main actor yields to the operation task.
+    let first = model.receive(fileID: 77, context: context)
+    let duplicate = model.receive(fileID: 77, context: context)
+    await first.value
+    await duplicate.value
+
+    // Assert
+    #expect(await repository.recordedCalls() == [.receive(fileID: 77, context: context)])
+    #expect(model.operation(for: 77) == nil)
+}
+
+@MainActor
+@Test func fileTransferViewModelRetainsActionableFailureUntilRetry() async {
+    // Arrange
+    let repository = FileTransferRepositorySpy(failingAction: .retry)
+    let model = FileTransferViewModel(repository: repository)
+    let context = UserContext(userID: 4, remoteHostID: nil)
+
+    // Act
+    await model.retry(fileID: 88, context: context).value
+
+    // Assert
+    #expect(model.operation(for: 88)?.action == nil)
+    #expect(model.operation(for: 88)?.errorMessage == "The transfer endpoint is unavailable.")
+
+    model.clearError(fileID: 88)
+    #expect(model.operation(for: 88) == nil)
+}
+
+private actor FileTransferRepositorySpy: FileTransferRepository {
+    enum Action: Equatable, Sendable {
+        case receive
+        case retry
+        case cancel
+    }
+
+    enum Call: Equatable, Sendable {
+        case receive(fileID: Int64, context: UserContext)
+        case retry(fileID: Int64, context: UserContext)
+        case cancel(fileID: Int64, context: UserContext)
+    }
+
+    struct TestFailure: LocalizedError {
+        var errorDescription: String? { "The transfer endpoint is unavailable." }
+    }
+
+    private let failingAction: Action?
+    private var calls: [Call] = []
+
+    init(failingAction: Action? = nil) {
+        self.failingAction = failingAction
+    }
+
+    func receive(fileID: Int64, context: UserContext) throws {
+        calls.append(.receive(fileID: fileID, context: context))
+        if failingAction == .receive { throw TestFailure() }
+    }
+
+    func retry(fileID: Int64, context: UserContext) throws {
+        calls.append(.retry(fileID: fileID, context: context))
+        if failingAction == .retry { throw TestFailure() }
+    }
+
+    func cancel(fileID: Int64, context: UserContext) throws {
+        calls.append(.cancel(fileID: fileID, context: context))
+        if failingAction == .cancel { throw TestFailure() }
+    }
+
+    func recordedCalls() -> [Call] {
+        calls
+    }
 }
 
 @Test func opensTemporaryDatabaseAndDecryptsAttachmentWithBundledCore() async throws {

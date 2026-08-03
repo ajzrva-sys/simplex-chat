@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
 enum DesktopChatDensity: String, CaseIterable, Identifiable, Sendable {
@@ -60,12 +61,14 @@ enum DesktopCopyCommandRoute: Equatable, Sendable {
 enum PendingAttachmentKind: String, Sendable {
     case image
     case video
+    case voice
     case document
 
     var symbolName: String {
         switch self {
         case .image: "photo"
         case .video: "film"
+        case .voice: "waveform"
         case .document: "doc"
         }
     }
@@ -73,6 +76,7 @@ enum PendingAttachmentKind: String, Sendable {
 
 struct PendingAttachment: Identifiable, Hashable, Sendable {
     static let maximumByteCount: Int64 = 5 * 1_024 * 1_024 * 1_024
+    static let maximumPreviewCharacterCount = 14_000
 
     let id: UUID
     let url: URL
@@ -80,11 +84,29 @@ struct PendingAttachment: Identifiable, Hashable, Sendable {
     let kind: PendingAttachmentKind
     let byteCount: Int64
     let previewImage: String?
+    let durationSeconds: Int?
+
+    init(
+        id: UUID,
+        url: URL,
+        fileName: String,
+        kind: PendingAttachmentKind,
+        byteCount: Int64,
+        previewImage: String?,
+        durationSeconds: Int? = nil
+    ) {
+        self.id = id
+        self.url = url
+        self.fileName = fileName
+        self.kind = kind
+        self.byteCount = byteCount
+        self.previewImage = previewImage
+        self.durationSeconds = durationSeconds
+    }
 
     static func stage(url: URL) throws -> PendingAttachment {
         let resolvedURL = url.resolvingSymlinksInPath()
         let values = try resolvedURL.resourceValues(forKeys: [
-            .contentTypeKey,
             .fileSizeKey,
             .isRegularFileKey,
             .isReadableKey,
@@ -97,14 +119,26 @@ struct PendingAttachment: Identifiable, Hashable, Sendable {
         guard byteCount <= maximumByteCount else {
             throw AttachmentValidationError.tooLarge(resolvedURL.lastPathComponent)
         }
-        let contentType = values.contentType
+        let contentType = (try? resolvedURL.resourceValues(forKeys: [.contentTypeKey]).contentType)
+            ?? UTType(filenameExtension: resolvedURL.pathExtension)
+        let fileExtension = resolvedURL.pathExtension.lowercased()
         let kind: PendingAttachmentKind
         if contentType?.conforms(to: .image) == true {
             kind = .image
         } else if contentType?.conforms(to: .movie) == true || contentType?.conforms(to: .video) == true {
             kind = .video
+        } else if ["jpg", "jpeg", "png", "gif", "heic", "heif", "tif", "tiff", "bmp", "webp", "avif"].contains(fileExtension) {
+            kind = .image
+        } else if ["mov", "mp4", "m4v", "avi", "mkv", "webm"].contains(fileExtension) {
+            kind = .video
         } else {
             kind = .document
+        }
+        let previewImage: String?
+        if kind == .image {
+            previewImage = try imagePreview(from: resolvedURL)
+        } else {
+            previewImage = nil
         }
         return PendingAttachment(
             id: UUID(),
@@ -112,7 +146,24 @@ struct PendingAttachment: Identifiable, Hashable, Sendable {
             fileName: values.name ?? resolvedURL.lastPathComponent,
             kind: kind,
             byteCount: byteCount,
-            previewImage: kind == .image ? imagePreview(from: resolvedURL) : nil
+            previewImage: previewImage,
+            durationSeconds: nil
+        )
+    }
+
+    static func voiceRecording(url: URL, durationSeconds: Int) throws -> PendingAttachment {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isReadableKey])
+        guard values.isRegularFile == true, values.isReadable != false else {
+            throw AttachmentValidationError.notAReadableFile(url.lastPathComponent)
+        }
+        return PendingAttachment(
+            id: UUID(),
+            url: url,
+            fileName: url.lastPathComponent,
+            kind: .voice,
+            byteCount: Int64(values.fileSize ?? 0),
+            previewImage: nil,
+            durationSeconds: max(1, min(durationSeconds, 300))
         )
     }
 
@@ -133,21 +184,47 @@ struct PendingAttachment: Identifiable, Hashable, Sendable {
         Array(attachments.dropFirst(min(max(failedIndex, 0), attachments.count)))
     }
 
-    private static func imagePreview(from url: URL) -> String? {
-        guard let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else { return nil }
-        let maximumDimension: CGFloat = 512
-        let scale = min(1, maximumDimension / max(image.size.width, image.size.height))
-        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
-        let preview = NSImage(size: size)
-        preview.lockFocus()
-        image.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .copy, fraction: 1)
-        preview.unlockFocus()
-        guard let tiff = preview.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.72]) else {
-            return nil
+    static func imagePreview(from url: URL) throws -> String {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetCount(source) > 0 else {
+            throw AttachmentValidationError.invalidImage(url.lastPathComponent)
         }
-        return "data:image/jpeg;base64,\(data.base64EncodedString())"
+
+        var maximumPixelSize = 512
+        while maximumPixelSize >= 64 {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+                kCGImageSourceShouldCacheImmediately: true,
+            ]
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                throw AttachmentValidationError.invalidImage(url.lastPathComponent)
+            }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+
+            if bitmap.hasAlpha,
+               let png = bitmap.representation(using: .png, properties: [:]),
+               let preview = dataURI(mimeType: "image/png", data: png),
+               preview.count <= maximumPreviewCharacterCount {
+                return preview
+            }
+
+            for quality in stride(from: 0.82, through: 0.30, by: -0.08) {
+                guard let jpeg = bitmap.representation(
+                    using: .jpeg,
+                    properties: [.compressionFactor: quality]
+                ), let preview = dataURI(mimeType: "image/jpeg", data: jpeg) else { continue }
+                if preview.count <= maximumPreviewCharacterCount { return preview }
+            }
+            maximumPixelSize = Int(Double(maximumPixelSize) * 0.80)
+        }
+        throw AttachmentValidationError.previewTooLarge(url.lastPathComponent)
+    }
+
+    private static func dataURI(mimeType: String, data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        return "data:\(mimeType);base64,\(data.base64EncodedString())"
     }
 }
 
@@ -176,11 +253,15 @@ enum PendingAttachmentBatch {
 enum AttachmentValidationError: LocalizedError, Equatable {
     case notAReadableFile(String)
     case tooLarge(String)
+    case invalidImage(String)
+    case previewTooLarge(String)
 
     var errorDescription: String? {
         switch self {
         case let .notAReadableFile(name): "“\(name)” is not a readable file."
-        case let .tooLarge(name): "“\(name)” is larger than SimpleX’s 5 GB file limit."
+        case let .tooLarge(name): "“\(name)” is larger than the 5 GB file limit."
+        case let .invalidImage(name): "“\(name)” is not an image that macOS can read."
+        case let .previewTooLarge(name): "“\(name)” could not be prepared for sending. Try exporting it as JPEG or PNG."
         }
     }
 }
@@ -429,7 +510,7 @@ enum NativeNotificationParser {
         case .contact:
             DesktopNotificationPreview(title: payload.displayName, body: genericBody)
         case .hidden:
-            DesktopNotificationPreview(title: "SimpleX Chat", body: genericBody)
+            DesktopNotificationPreview(title: AppIdentity.displayName, body: genericBody)
         }
     }
 

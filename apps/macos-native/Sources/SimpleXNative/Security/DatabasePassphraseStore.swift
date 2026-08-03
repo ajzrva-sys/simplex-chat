@@ -12,8 +12,8 @@ actor DatabasePassphraseKeychain: DatabasePassphraseStore {
     private let account: String
 
     init(
-        service: String = "chat.simplex.native.database",
-        account: String = "simplex_v1"
+        service: String = AppIdentity.keychainService,
+        account: String = AppIdentity.keychainAccount
     ) {
         self.service = service
         self.account = account
@@ -90,6 +90,44 @@ actor DatabasePassphraseKeychain: DatabasePassphraseStore {
             kSecAttrAccount: account,
             kSecUseDataProtectionKeychain: true,
         ]
+    }
+}
+
+actor MigratingDatabasePassphraseStore: DatabasePassphraseStore {
+    private let primary: DatabasePassphraseKeychain
+    private let legacy: DatabasePassphraseKeychain
+    private var loadedLegacyValue = false
+
+    init(
+        primary: DatabasePassphraseKeychain = DatabasePassphraseKeychain(),
+        legacy: DatabasePassphraseKeychain = DatabasePassphraseKeychain(
+            service: AppIdentity.legacyKeychainService,
+            account: "simplex_v1"
+        )
+    ) {
+        self.primary = primary
+        self.legacy = legacy
+    }
+
+    func load() async throws -> String? {
+        if let value = try await primary.load() { return value }
+        guard let value = try await legacy.load() else { return nil }
+        loadedLegacyValue = true
+        return value
+    }
+
+    func save(_ passphrase: String) async throws {
+        try await primary.save(passphrase)
+        if loadedLegacyValue {
+            try await legacy.delete()
+            loadedLegacyValue = false
+        }
+    }
+
+    func delete() async throws {
+        try await primary.delete()
+        try await legacy.delete()
+        loadedLegacyValue = false
     }
 }
 

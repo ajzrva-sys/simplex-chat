@@ -36,6 +36,12 @@ struct SidebarView: View {
                     if let name = model.profile?.displayName {
                         Text(name)
                     }
+                    Button {
+                        model.featureCenterPresented = true
+                    } label: {
+                        Label("People & Devices…", systemImage: "person.2.badge.gearshape")
+                    }
+                    Divider()
                     SettingsLink {
                         Label("Settings…", systemImage: "gear")
                     }

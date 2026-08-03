@@ -19,7 +19,7 @@ struct SimpleXNativeApp: App {
     }
 
     var body: some Scene {
-        Window("SimpleX", id: MainWindowCommands.windowID) {
+        Window(AppIdentity.displayName, id: MainWindowCommands.windowID) {
             RootView(model: model, notifications: notifications)
                 .frame(minWidth: 760, minHeight: 520)
         }
@@ -87,46 +87,7 @@ struct SimpleXNativeApp: App {
         }
 
         Settings {
-            Form {
-                Section("Interface") {
-                    LabeledContent("Appearance", value: "Follows macOS")
-                    LabeledContent("Profile", value: model.profile?.displayName ?? "Locked")
-                    Picker("Chat density", selection: $model.density) {
-                        ForEach(DesktopChatDensity.allCases) { density in
-                            Text(density.title).tag(density)
-                        }
-                    }
-                    .pickerStyle(.radioGroup)
-                }
-
-                Section("Notifications") {
-                    LabeledContent("Permission", value: notifications.permissionState.title)
-                    Picker("Show previews", selection: $notifications.previewMode) {
-                        ForEach(NotificationPreviewMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    Toggle("Play notification sounds", isOn: $notifications.soundsEnabled)
-                    Button("Open Mac Notification Settings", action: notifications.openSystemSettings)
-                }
-
-                Section("Security") {
-                    LabeledContent(
-                        "Database passphrase",
-                        value: keychainPassphraseStatus
-                    )
-                    Button("Forget Saved Passphrase", role: .destructive, action: model.forgetSavedPassphrase)
-                        .disabled(!model.keychainPassphraseStorageAvailable || !model.hasStoredPassphrase)
-                    if let message = model.keychainStatusMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            .padding(20)
-            .frame(width: 420)
+            NativeSettingsView(model: model, notifications: notifications)
         }
     }
 
@@ -134,10 +95,4 @@ struct SimpleXNativeApp: App {
         NSApp.sendAction(Selector(name), to: nil, from: nil)
     }
 
-    private var keychainPassphraseStatus: String {
-        guard model.keychainPassphraseStorageAvailable else {
-            return "Unavailable in this development build"
-        }
-        return model.hasStoredPassphrase ? "Saved in Mac Keychain" : "Not saved"
-    }
 }

@@ -9,6 +9,7 @@
 typedef void (*hs_init_with_rtsopts_fn)(int *, char ***);
 typedef char *(*chat_migrate_init_fn)(const char *, const char *, const char *, void **);
 typedef char *(*chat_send_cmd_retry_fn)(void *, const char *, int);
+typedef char *(*chat_send_remote_cmd_retry_fn)(void *, int, const char *, int);
 typedef char *(*chat_recv_msg_wait_fn)(void *, int);
 typedef char *(*chat_encrypt_file_fn)(void *, const char *, const char *);
 typedef char *(*chat_decrypt_file_fn)(const char *, const char *, const char *, const char *);
@@ -18,6 +19,7 @@ static void *simplex_handle = NULL;
 static hs_init_with_rtsopts_fn hs_initialize = NULL;
 static chat_migrate_init_fn migrate_init = NULL;
 static chat_send_cmd_retry_fn send_cmd_retry = NULL;
+static chat_send_remote_cmd_retry_fn send_remote_cmd_retry = NULL;
 static chat_recv_msg_wait_fn recv_msg_wait = NULL;
 static chat_encrypt_file_fn encrypt_file = NULL;
 static chat_decrypt_file_fn decrypt_file = NULL;
@@ -47,12 +49,13 @@ bool sx_core_load(const char *library_directory, char *error_buffer, size_t erro
     hs_initialize = (hs_init_with_rtsopts_fn)dlsym(RTLD_DEFAULT, "hs_init_with_rtsopts");
     migrate_init = (chat_migrate_init_fn)dlsym(simplex_handle, "chat_migrate_init");
     send_cmd_retry = (chat_send_cmd_retry_fn)dlsym(simplex_handle, "chat_send_cmd_retry");
+    send_remote_cmd_retry = (chat_send_remote_cmd_retry_fn)dlsym(simplex_handle, "chat_send_remote_cmd_retry");
     recv_msg_wait = (chat_recv_msg_wait_fn)dlsym(simplex_handle, "chat_recv_msg_wait");
     encrypt_file = (chat_encrypt_file_fn)dlsym(simplex_handle, "chat_encrypt_file");
     decrypt_file = (chat_decrypt_file_fn)dlsym(simplex_handle, "chat_decrypt_file");
     close_store = (chat_close_store_fn)dlsym(simplex_handle, "chat_close_store");
 
-    if (hs_initialize == NULL || migrate_init == NULL || send_cmd_retry == NULL || recv_msg_wait == NULL || encrypt_file == NULL || decrypt_file == NULL || close_store == NULL) {
+    if (hs_initialize == NULL || migrate_init == NULL || send_cmd_retry == NULL || send_remote_cmd_retry == NULL || recv_msg_wait == NULL || encrypt_file == NULL || decrypt_file == NULL || close_store == NULL) {
         set_error(error_buffer, error_buffer_size, "The SimpleX core is missing a required exported function");
         dlclose(simplex_handle);
         simplex_handle = NULL;
@@ -82,6 +85,10 @@ const char *sx_core_migrate_init(const char *path, const char *key, const char *
 
 const char *sx_core_send_cmd(void *controller, const char *command, int retry_count) {
     return send_cmd_retry == NULL ? NULL : send_cmd_retry(controller, command, retry_count);
+}
+
+const char *sx_core_send_remote_cmd(void *controller, int remote_host_id, const char *command, int retry_count) {
+    return send_remote_cmd_retry == NULL ? NULL : send_remote_cmd_retry(controller, remote_host_id, command, retry_count);
 }
 
 const char *sx_core_recv_msg_wait(void *controller, int timeout_microseconds) {

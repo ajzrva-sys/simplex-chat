@@ -27,7 +27,7 @@ struct RootView: View {
                     ConversationView(model: model)
                         .navigationSplitViewColumnWidth(min: 520, ideal: 800)
                 }
-                .alert("SimpleX", isPresented: Binding(
+                .alert(AppIdentity.displayName, isPresented: Binding(
                     get: { if case .failed = model.phase { true } else { false } },
                     set: { if !$0 { model.phase = .ready } }
                 )) {
@@ -45,7 +45,10 @@ struct RootView: View {
                 notifications.respondToPermissionExplanation(requestPermission: false)
             }
         } message: {
-            Text("SimpleX can use native Mac notifications for messages, contact requests, and calls. You can choose how much message detail appears in Settings.")
+            Text("Native Chat can use Mac notifications for messages, contact requests, and calls. You can choose how much detail appears in Settings.")
+        }
+        .sheet(isPresented: $model.featureCenterPresented) {
+            PeopleAndDevicesView(model: model)
         }
     }
 }

@@ -20,6 +20,7 @@ private final class SimpleXControllerHandle: @unchecked Sendable {
 
 actor SimpleXCore {
     private var controller: SimpleXControllerHandle?
+    private var activeRemoteHostID: Int64?
     private var loaded = false
     private let decryptedFilesDirectory: URL
 
@@ -51,8 +52,18 @@ actor SimpleXCore {
         return (profile, chats)
     }
 
-    func loadChats(userID: Int64) throws -> [NativeChat] {
-        try NativeChatParser.chats(from: send("/_get chats \(userID) pcc=on"))
+    func loadChats(userID: Int64, remoteHostID: Int64? = nil) throws -> [NativeChat] {
+        try NativeChatParser.chats(from: send("/_get chats \(userID) pcc=on", remoteHostID: remoteHostID))
+    }
+
+    func switchProfile(userID: Int64) throws -> NativeProfile {
+        try NativeChatParser.profile(from: send("/_user \(userID)"))
+    }
+
+    func switchRemoteHost(_ remoteHostID: Int64?) throws {
+        let destination = remoteHostID.map(String.init) ?? "local"
+        try ensureCommandSucceeded(send("/switch remote host \(destination)", forceLocal: true))
+        activeRemoteHostID = remoteHostID
     }
 
     func loadMessages(chatID: String, around messageID: Int64? = nil) throws -> [NativeMessage] {
@@ -60,6 +71,14 @@ actor SimpleXCore {
             chatID: chatID,
             around: messageID,
             count: 75
+        )))
+    }
+
+    func loadOlderMessages(chatID: String, before itemID: Int64, count: Int = 100) throws -> [NativeMessage] {
+        try NativeChatParser.messages(from: send(Self.chatPageBeforeCommand(
+            chatID: chatID,
+            before: itemID,
+            count: count
         )))
     }
 
@@ -76,6 +95,14 @@ actor SimpleXCore {
         try ensureCommandSucceeded(send(Self.markChatReadCommand(chatID: chatID)))
     }
 
+    func receiveFile(fileID: Int64, remoteHostID: Int64? = nil) throws {
+        try ensureCommandSucceeded(send(Self.receiveFileCommand(fileID: fileID), remoteHostID: remoteHostID))
+    }
+
+    func cancelFile(fileID: Int64, remoteHostID: Int64? = nil) throws {
+        try ensureCommandSucceeded(send(Self.cancelFileCommand(fileID: fileID), remoteHostID: remoteHostID))
+    }
+
     nonisolated static func chatPageCommand(
         chatID: String,
         around messageID: Int64?,
@@ -85,8 +112,20 @@ actor SimpleXCore {
         return "/_get chat \(chatID) \(pagination)"
     }
 
+    nonisolated static func chatPageBeforeCommand(chatID: String, before itemID: Int64, count: Int) -> String {
+        "/_get chat \(chatID) before=\(itemID) count=\(count)"
+    }
+
     nonisolated static func markChatReadCommand(chatID: String) -> String {
         "/_read chat \(chatID)"
+    }
+
+    nonisolated static func receiveFileCommand(fileID: Int64) -> String {
+        "/fr \(fileID)"
+    }
+
+    nonisolated static func cancelFileCommand(fileID: Int64) -> String {
+        "/fc \(fileID)"
     }
 
     func sendText(_ text: String, quotedItemID: Int64?, to chat: NativeChat) throws -> NativeSendReceipt {
@@ -125,6 +164,12 @@ actor SimpleXCore {
                 "text": caption,
                 "image": "",
                 "duration": 0,
+            ]
+        case .voice:
+            messageContent = [
+                "type": "voice",
+                "text": caption,
+                "duration": attachment.durationSeconds ?? 1,
             ]
         case .document:
             messageContent = ["type": "file", "text": caption]
@@ -349,11 +394,21 @@ actor SimpleXCore {
         try ensureCommandSucceeded(send("/set file paths \(json)"))
     }
 
-    private func send(_ command: String) throws -> Data {
+    func sendCommand(_ command: String, remoteHostID: Int64? = nil, forceLocal: Bool = false) throws -> Data {
+        try send(command, remoteHostID: remoteHostID, forceLocal: forceLocal)
+    }
+
+    private func send(_ command: String, remoteHostID: Int64? = nil, forceLocal: Bool = false) throws -> Data {
         guard let controller else {
             throw NativeChatError.unavailable("The SimpleX database is not open.")
         }
-        let result = command.withCString { sx_core_send_cmd(controller.pointer, $0, 0) }
+        let commandRemoteHostID = forceLocal ? nil : (remoteHostID ?? activeRemoteHostID)
+        let result = command.withCString { commandPointer in
+            if let remoteHostID = commandRemoteHostID {
+                return sx_core_send_remote_cmd(controller.pointer, Int32(remoteHostID), commandPointer, 0)
+            }
+            return sx_core_send_cmd(controller.pointer, commandPointer, 0)
+        }
         return try data(from: result)
     }
 

@@ -82,6 +82,8 @@ struct NativeMessage: Identifiable, Hashable, Sendable {
     let replyable: Bool
     let quotedItem: NativeQuote?
     let fileSource: NativeCryptoFile?
+    let fileTransfer: NativeFileTransfer?
+    let reactions: [NativeReaction]
 
     init(
         id: Int64,
@@ -93,7 +95,12 @@ struct NativeMessage: Identifiable, Hashable, Sendable {
         content: NativeMessageContent,
         replyable: Bool = true,
         quotedItem: NativeQuote? = nil,
-        fileSource: NativeCryptoFile? = nil
+        fileSource: NativeCryptoFile? = nil,
+        fileTransfer: NativeFileTransfer? = nil,
+        fileID: Int64? = nil,
+        fileSize: Int64? = nil,
+        fileStatus: String? = nil,
+        reactions: [NativeReaction] = []
     ) {
         self.id = id
         self.text = text
@@ -105,12 +112,228 @@ struct NativeMessage: Identifiable, Hashable, Sendable {
         self.replyable = replyable
         self.quotedItem = quotedItem
         self.fileSource = fileSource
+        self.fileTransfer = fileTransfer ?? fileID.map {
+            NativeFileTransfer(
+                id: $0,
+                fileName: content.fileName,
+                fileSize: fileSize,
+                fileProtocol: .unknown,
+                rawStatus: fileStatus,
+                progressUnits: nil,
+                totalUnits: nil,
+                errorDescription: nil,
+                source: fileSource
+            )
+        }
+        self.reactions = reactions
     }
+
+    var fileID: Int64? { fileTransfer?.id }
+    var fileSize: Int64? { fileTransfer?.fileSize }
+    var fileStatus: String? { fileTransfer?.rawStatus }
 
     var replyPreview: String {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return normalizedText.isEmpty ? (content.attachmentDescription ?? "Message") : normalizedText
     }
+
+    func replacingReactions(_ reactions: [NativeReaction]) -> NativeMessage {
+        NativeMessage(
+            id: id,
+            text: text,
+            timestamp: timestamp,
+            sent: sent,
+            author: author,
+            deletable: deletable,
+            content: content,
+            replyable: replyable,
+            quotedItem: quotedItem,
+            fileSource: fileSource,
+            fileTransfer: fileTransfer,
+            reactions: reactions
+        )
+    }
+
+    var attachmentCanBeReceived: Bool {
+        fileTransfer?.canReceive == true
+    }
+
+    var attachmentIsInProgress: Bool {
+        fileTransfer?.isInProgress == true
+    }
+
+    var attachmentFailureDescription: String? {
+        fileTransfer?.failureDescription
+    }
+}
+
+struct NativeFileTransfer: Hashable, Sendable {
+    enum FileProtocol: String, Hashable, Sendable {
+        case smp
+        case xftp
+        case local
+        case unknown
+    }
+
+    enum Direction: Hashable, Sendable {
+        case sending
+        case receiving
+        case unknown
+    }
+
+    let id: Int64
+    let fileName: String?
+    let fileSize: Int64?
+    let fileProtocol: FileProtocol
+    let rawStatus: String?
+    let state: TransferState
+    let direction: Direction
+
+    init(
+        id: Int64,
+        fileName: String?,
+        fileSize: Int64?,
+        fileProtocol: FileProtocol,
+        rawStatus: String?,
+        progressUnits: Int64?,
+        totalUnits: Int64?,
+        errorDescription: String?,
+        source: NativeCryptoFile?
+    ) {
+        self.id = id
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.fileProtocol = fileProtocol
+        self.rawStatus = rawStatus
+        direction = Self.direction(for: rawStatus)
+        state = Self.state(
+            for: rawStatus,
+            progressUnits: progressUnits,
+            totalUnits: totalUnits,
+            fileSize: fileSize,
+            errorDescription: errorDescription,
+            source: source
+        )
+    }
+
+    var canReceive: Bool {
+        rawStatus == "rcvInvitation" || rawStatus == "rcvAborted"
+    }
+
+    var canRetry: Bool {
+        rawStatus == "rcvAborted" || rawStatus == "rcvError" || rawStatus == "rcvWarning"
+    }
+
+    var canCancel: Bool {
+        switch rawStatus {
+        case "sndStored", "sndTransfer", "sndWarning", "rcvAccepted", "rcvTransfer", "rcvWarning": true
+        default: false
+        }
+    }
+
+    var isInProgress: Bool {
+        switch rawStatus {
+        case "sndStored", "sndTransfer", "rcvAccepted", "rcvTransfer": true
+        default: false
+        }
+    }
+
+    var failureDescription: String? {
+        switch rawStatus {
+        case "rcvCancelled": "The attachment download was cancelled."
+        case "sndCancelled": "The attachment upload was cancelled."
+        case "rcvError": state.failureMessage ?? "The full-resolution attachment could not be downloaded."
+        case "sndError": state.failureMessage ?? "The attachment could not be uploaded."
+        case "invalid": state.failureMessage ?? "The attachment is invalid."
+        default: nil
+        }
+    }
+
+    var statusLabel: String? {
+        switch rawStatus {
+        case "sndStored": "Preparing upload…"
+        case "sndTransfer": "Uploading…"
+        case "sndComplete": "Uploaded"
+        case "sndCancelled": "Upload cancelled"
+        case "sndError": "Upload failed"
+        case "sndWarning": "Upload delayed"
+        case "rcvInvitation": "Ready to download"
+        case "rcvAccepted": "Waiting for sender…"
+        case "rcvTransfer": "Downloading…"
+        case "rcvAborted": "Download interrupted"
+        case "rcvComplete": "Downloaded"
+        case "rcvCancelled": "Download cancelled"
+        case "rcvError": "Download failed"
+        case "rcvWarning": "Download delayed"
+        case "invalid": "Invalid attachment"
+        default: nil
+        }
+    }
+
+    private static func direction(for status: String?) -> Direction {
+        guard let status else { return .unknown }
+        if status.hasPrefix("snd") { return .sending }
+        if status.hasPrefix("rcv") { return .receiving }
+        return .unknown
+    }
+
+    private static func state(
+        for status: String?,
+        progressUnits: Int64?,
+        totalUnits: Int64?,
+        fileSize: Int64?,
+        errorDescription: String?,
+        source: NativeCryptoFile?
+    ) -> TransferState {
+        switch status {
+        case "sndTransfer", "rcvTransfer":
+            let estimatedBytes = estimatedBytes(
+                progressUnits: progressUnits,
+                totalUnits: totalUnits,
+                fileSize: fileSize
+            )
+            return .transferring(bytesTransferred: estimatedBytes, totalBytes: fileSize)
+        case "rcvAccepted", "sndStored":
+            return .transferring(bytesTransferred: 0, totalBytes: fileSize)
+        case "rcvAborted":
+            return .paused(bytesTransferred: 0, totalBytes: fileSize)
+        case "sndComplete", "rcvComplete":
+            return .complete(source?.sourceURL)
+        case "sndCancelled", "rcvCancelled":
+            return .cancelled
+        case "sndError", "rcvError", "invalid":
+            return .failed(errorDescription ?? "The file transfer failed.")
+        case "sndWarning", "rcvWarning":
+            return .paused(bytesTransferred: 0, totalBytes: fileSize)
+        default:
+            return .queued
+        }
+    }
+
+    private static func estimatedBytes(
+        progressUnits: Int64?,
+        totalUnits: Int64?,
+        fileSize: Int64?
+    ) -> Int64 {
+        guard let progressUnits, let totalUnits, totalUnits > 0 else { return 0 }
+        guard let fileSize, fileSize > 0 else { return max(progressUnits, 0) }
+        let fraction = min(max(Double(progressUnits) / Double(totalUnits), 0), 1)
+        return Int64((Double(fileSize) * fraction).rounded(.down))
+    }
+}
+
+private extension TransferState {
+    var failureMessage: String? {
+        guard case let .failed(message) = self else { return nil }
+        return message
+    }
+}
+
+struct NativeReaction: Identifiable, Hashable, Sendable {
+    var id: String { emoji }
+    let emoji: String
+    let count: Int
+    let userReacted: Bool
 }
 
 enum NativeMessageContent: Hashable, Sendable {
@@ -409,13 +632,36 @@ enum NativeChatParser {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let error = root["error"] else { return nil }
         if let error = error as? [String: Any] {
-            let type = (error["errorType"] as? [String: Any]).flatMap { string($0["type"]) }
-                ?? string(error["type"])
+            let type = nestedErrorType(in: error)
                 ?? error.keys.first
                 ?? "coreError"
-            return "SimpleX could not complete the action (\(type))."
+            switch type {
+            case "largeMsg":
+                return "This message is too large to send. The attachment is still ready so you can try again."
+            case "fileNotFound":
+                return "The attachment is no longer available at its original location. Add it again and retry."
+            case "fileSize", "largeFile":
+                return "This attachment is larger than the conversation’s file-size limit."
+            case "invalidQuote", "chatItemNotFound", "badChatItem":
+                return "The message being replied to is no longer available."
+            case "permissionDenied", "notAllowed":
+                return "You don’t have permission to complete this action in this conversation."
+            default:
+                return "The chat service could not complete the action (\(type))."
+            }
         }
-        return "SimpleX could not complete the action."
+        return "The chat service could not complete the action."
+    }
+
+    private static func nestedErrorType(in error: [String: Any]) -> String? {
+        let nestedKeys = ["storeError", "errorType", "agentError", "chatError", "fileError"]
+        for key in nestedKeys {
+            if let nested = error[key] as? [String: Any],
+               let type = nestedErrorType(in: nested) ?? string(nested["type"]) {
+                return type
+            }
+        }
+        return string(error["type"])
     }
 
     static func commandErrorMakesReplyTargetUnavailable(_ data: Data) -> Bool {
@@ -597,7 +843,16 @@ enum NativeChatParser {
             ?? ((contentContainer?["rcvMsgContent"] as? [String: Any])?["msgContent"] as? [String: Any])
         let file = object["file"] as? [String: Any]
         let fileSource = file?["fileSource"] as? [String: Any]
+        let fileStatusObject = file?["fileStatus"] as? [String: Any]
+        let fileStatus = string(fileStatusObject?["type"])
+            ?? fileStatusObject?.keys.first
+            ?? string(file?["fileStatus"])
+        let fileID = int64(file?["fileId"])
+        let fileSize = int64(file?["fileSize"])
         let fileName = string(file?["fileName"])
+        let fileProtocol = NativeFileTransfer.FileProtocol(
+            rawValue: string(file?["fileProtocol"]) ?? ""
+        ) ?? .unknown
         let filePath = string(fileSource?["filePath"])
         let cryptoArgsObject = fileSource?["cryptoArgs"] as? [String: Any]
         let cryptoArgs = cryptoArgsObject.flatMap { args -> NativeCryptoFileArgs? in
@@ -605,6 +860,21 @@ enum NativeChatParser {
             return NativeCryptoFileArgs(fileKey: key, fileNonce: nonce)
         }
         let nativeFileSource = filePath.map { NativeCryptoFile(filePath: $0, cryptoArgs: cryptoArgs) }
+        let fileTransfer = fileID.map {
+            NativeFileTransfer(
+                id: $0,
+                fileName: fileName,
+                fileSize: fileSize,
+                fileProtocol: fileProtocol,
+                rawStatus: fileStatus,
+                progressUnits: int64(fileStatusObject?["sndProgress"])
+                    ?? int64(fileStatusObject?["rcvProgress"]),
+                totalUnits: int64(fileStatusObject?["sndTotal"])
+                    ?? int64(fileStatusObject?["rcvTotal"]),
+                errorDescription: fileTransferErrorDescription(fileStatusObject),
+                source: nativeFileSource
+            )
+        }
         let content: NativeMessageContent
         switch string(messageContent?["type"]) {
         case "link":
@@ -651,8 +921,33 @@ enum NativeChatParser {
             content: content,
             replyable: replyable,
             quotedItem: parseQuote(object["quotedItem"]),
-            fileSource: nativeFileSource
+            fileSource: nativeFileSource,
+            fileTransfer: fileTransfer,
+            reactions: parseReactions(object["reactions"])
         )
+    }
+
+    private static func fileTransferErrorDescription(_ status: [String: Any]?) -> String? {
+        guard let status else { return nil }
+        let error = status["sndFileError"] ?? status["rcvFileError"] ?? status["text"]
+        if let text = string(error) { return text }
+        guard let object = error as? [String: Any] else { return nil }
+        return string(object["fileError"])
+            ?? string(object["type"])
+            ?? object.keys.sorted().first
+    }
+
+    private static func parseReactions(_ value: Any?) -> [NativeReaction] {
+        (value as? [[String: Any]] ?? []).compactMap { entry in
+            let reaction = entry["reaction"] as? [String: Any]
+            guard string(reaction?["type"]) == "emoji",
+                  let emoji = string(reaction?["emoji"]) else { return nil }
+            return NativeReaction(
+                emoji: emoji == "❤" ? "❤️" : emoji,
+                count: int(entry["totalReacted"]) ?? 0,
+                userReacted: bool(entry["userReacted"]) ?? false
+            )
+        }
     }
 
     private static func parseQuote(_ value: Any?) -> NativeQuote? {
