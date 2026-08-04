@@ -146,6 +146,28 @@ final class AppModel: ObservableObject {
     private var quoteNavigationRevision: UInt64 = 0
     private static let densityKey = "desktopChatDensity"
 
+    private(set) lazy var deviceMigrationCoordinator: DeviceMigrationCoordinator = {
+        DeviceMigrationCoordinator(
+            core: core,
+            passphraseStore: passphraseStore,
+            canStorePassphrase: keychainPassphraseStorageAvailable,
+            pauseMainEvents: { [weak self] in
+                self?.eventTask?.cancel()
+                self?.eventTask = nil
+            },
+            resumeMainEvents: { [weak self] in
+                self?.startEventLoop()
+            },
+            applyImportedProfile: { [weak self] profile, chats, rememberedPassphrase in
+                await self?.applyImportedProfile(
+                    profile,
+                    chats: chats,
+                    rememberedPassphrase: rememberedPassphrase
+                )
+            }
+        )
+    }()
+
     private func attachmentKey(chatID: NativeChat.ID, messageID: Int64) -> AttachmentOpeningKey {
         AttachmentOpeningKey(
             userID: profile?.userID,
@@ -464,23 +486,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func cancelRemotePairing() {
+        guard let pairing = remotePairing else { return }
+        runFeatureOperation { [weak self] in
+            guard let self else { return }
+            try await core.stopRemoteHost(pairing.remoteHostID)
+            remotePairing = nil
+            linkedDevices = try await core.listLinkedDevices()
+        }
+    }
+
     func useRemoteHost(_ id: Int64?) {
         runFeatureOperation { [weak self] in
             guard let self else { return }
-            resetMediaContext()
-            try await core.switchRemoteHost(id)
-            currentRemoteHostID = id
-            let profiles = try await core.listProfiles()
-            managedProfiles = profiles
-            guard let active = profiles.first(where: \.active) ?? profiles.first else {
-                profile = nil
-                chats = []
-                _ = transitionToChat(nil)
+            guard let id else {
+                if let currentRemoteHostID {
+                    try await core.stopRemoteHost(currentRemoteHostID)
+                    remotePairing = nil
+                }
+                try await switchConversationSource(to: nil)
                 return
             }
-            profile = try await core.switchProfile(userID: active.id)
-            chats = try await core.loadChats(userID: active.id)
-            _ = transitionToChat(chats.first?.id)
+            if let device = linkedDevices.first(where: { $0.id == id }) {
+                switch device.state {
+                case .connected:
+                    try await switchConversationSource(to: id)
+                case .stopped:
+                    remotePairing = try await core.startRemoteHost(id)
+                    linkedDevices = try await core.listLinkedDevices()
+                case .starting, .connecting, .pendingConfirmation, .confirmed:
+                    return
+                case .local:
+                    try await switchConversationSource(to: nil)
+                }
+            } else {
+                try await switchConversationSource(to: id)
+            }
         }
     }
 
@@ -488,14 +529,36 @@ final class AppModel: ObservableObject {
         runFeatureOperation { [weak self] in
             guard let self else { return }
             if currentRemoteHostID == device.id {
-                resetMediaContext()
-                try await core.switchRemoteHost(nil)
-                currentRemoteHostID = nil
+                try await switchConversationSource(to: nil)
             }
-            try await core.stopRemoteHost(device.id)
+            if case .stopped = device.state {
+                // There is no live session to stop.
+            } else {
+                try await core.stopRemoteHost(device.id)
+            }
             try await core.deleteRemoteHost(device.id)
+            if remotePairing?.remoteHostID == device.id { remotePairing = nil }
             linkedDevices = try await core.listLinkedDevices()
         }
+    }
+
+    private func switchConversationSource(to remoteHostID: Int64?) async throws {
+        resetMediaContext()
+        try await core.switchRemoteHost(remoteHostID)
+        currentRemoteHostID = remoteHostID
+        let profiles = try await core.listProfiles()
+        managedProfiles = profiles
+        guard let active = profiles.first(where: \.active) ?? profiles.first else {
+            profile = nil
+            chats = []
+            _ = transitionToChat(nil)
+            linkedDevices = try await core.listLinkedDevices()
+            return
+        }
+        profile = try await core.switchProfile(userID: active.id)
+        chats = try await core.loadChats(userID: active.id)
+        _ = transitionToChat(chats.first?.id)
+        linkedDevices = try await core.listLinkedDevices()
     }
 
     private func runFeatureOperation(_ operation: @escaping @MainActor () async throws -> Void) {
@@ -1416,6 +1479,7 @@ final class AppModel: ObservableObject {
         var currentMessage = message
         var source = initialSource
         var receiveRequested = false
+        var remoteCopyRequested = false
         var refreshedOnce = false
 
         // A preview can arrive before the original file. Requesting the file and
@@ -1442,6 +1506,23 @@ final class AppModel: ObservableObject {
 
             if let failure = currentMessage.attachmentFailureDescription {
                 throw NativeChatError.unavailable(failure)
+            }
+
+            if !remoteCopyRequested,
+               let remoteHostID = currentRemoteHostID,
+               let userID = profile?.userID,
+               let fileID = currentMessage.fileID,
+               let source,
+               !FileManager.default.fileExists(atPath: source.sourceURL.path),
+               !currentMessage.attachmentIsInProgress {
+                try await core.getRemoteFile(
+                    remoteHostID: remoteHostID,
+                    userID: userID,
+                    fileID: fileID,
+                    sent: currentMessage.sent,
+                    fileSource: source
+                )
+                remoteCopyRequested = true
             }
 
             let refreshedMessage: NativeMessage?
@@ -2252,10 +2333,86 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 guard let event = await core.receiveEvent() else { continue }
-                await refreshAfterEvent()
+                if !(await handleLinkedDeviceEvent(event)) {
+                    await refreshAfterEvent()
+                }
                 notificationManager?.handleCoreEvent(event)
             }
         }
+    }
+
+    private func handleLinkedDeviceEvent(_ data: Data) async -> Bool {
+        switch PeopleAndDevicesParser.linkedDeviceEvent(from: data) {
+        case .ignored:
+            return false
+        case let .sessionCode(device, code):
+            if let device { upsertLinkedDevice(device) }
+            remotePairing = RemotePairing(
+                remoteHostID: device?.id ?? remotePairing?.remoteHostID,
+                invitation: remotePairing?.invitation ?? "",
+                sessionCode: code
+            )
+        case let .deviceCreated(device):
+            upsertLinkedDevice(device)
+            if let pairing = remotePairing {
+                remotePairing = RemotePairing(
+                    remoteHostID: device.id,
+                    invitation: pairing.invitation,
+                    sessionCode: pairing.sessionCode
+                )
+            }
+        case let .connected(device):
+            upsertLinkedDevice(device)
+            remotePairing = nil
+            do {
+                try await switchConversationSource(to: device.id)
+            } catch {
+                featureError = "The phone connected, but its chats could not be opened: \(error.localizedDescription)"
+            }
+        case let .stopped(remoteHostID, reason):
+            if remoteHostID == nil || remotePairing?.remoteHostID == remoteHostID {
+                remotePairing = nil
+            }
+            do {
+                if let remoteHostID, currentRemoteHostID == remoteHostID {
+                    try await switchConversationSource(to: nil)
+                } else {
+                    linkedDevices = try await core.listLinkedDevices()
+                }
+            } catch {
+                featureError = error.localizedDescription
+            }
+            if let reason { featureError = reason }
+        }
+        return true
+    }
+
+    private func upsertLinkedDevice(_ device: LinkedDevice) {
+        if let index = linkedDevices.firstIndex(where: { $0.id == device.id }) {
+            linkedDevices[index] = device
+        } else {
+            linkedDevices.append(device)
+        }
+    }
+
+    private func applyImportedProfile(
+        _ profile: NativeProfile,
+        chats: [NativeChat],
+        rememberedPassphrase: Bool
+    ) async {
+        resetMediaContext()
+        self.profile = profile
+        currentRemoteHostID = nil
+        self.chats = chats
+        selectedChatID = chats.first?.id
+        messages = []
+        phase = .ready
+        hasStoredPassphrase = rememberedPassphrase
+        if let chatID = selectedChatID {
+            _ = await loadConversation(chatID: chatID)
+        }
+        startEventLoop()
+        notificationManager?.chatSetupReady()
     }
 
     func refreshAfterEvent() async {

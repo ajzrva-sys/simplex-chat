@@ -1,3 +1,4 @@
+import AppKit
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
@@ -147,30 +148,107 @@ struct PeopleAndDevicesView: View {
                 }
                 ForEach(model.linkedDevices) { device in
                     HStack {
-                        Label(device.name, systemImage: "iphone")
+                        Image(systemName: "iphone")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(device.name)
+                            Text(deviceStatus(device))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
                         if model.currentRemoteHostID == device.id {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
-                        } else {
-                            Button("Use") { model.useRemoteHost(device.id) }
+                            Label("In Use", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.tint)
+                        } else if let actionTitle = deviceActionTitle(device) {
+                            Button(actionTitle) { model.useRemoteHost(device.id) }
                         }
-                        Button("Unlink", role: .destructive) { model.removeRemoteHost(device) }
+                        Button("Unlink", role: .destructive) {
+                            model.removeRemoteHost(device)
+                        }
+                        .disabled(model.isLoadingFeatures)
                     }
+                    .padding(.vertical, 4)
                 }
             }
             Section("Link a Mobile Device") {
-                Button("Create Pairing Code", action: model.beginRemotePairing)
-                if let pairing = model.remotePairing, !pairing.invitation.isEmpty {
-                    QRCodeView(value: pairing.invitation)
-                        .frame(width: 180, height: 180)
-                        .accessibilityLabel("Mobile pairing QR code")
-                    Text(pairing.invitation)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                Text("Your phone remains the chat host. Keep both devices on the same local network; while linked, use chats here instead of in the phone app.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                if let pairing = model.remotePairing {
+                    if let sessionCode = pairing.sessionCode, !sessionCode.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Compare this code with the one on your phone")
+                                .font(.headline)
+                            Text(sessionCode)
+                                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                                .textSelection(.enabled)
+                            Text("Confirm the matching code on your phone to finish linking.")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 8)
+                    } else if !pairing.invitation.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(pairing.remoteHostID == nil
+                                ? "On your phone, open SimpleX Settings → Use from desktop, then scan this code."
+                                : "On your phone, open SimpleX Settings → Use from desktop and choose this Mac. You can also scan this code.")
+                                .font(.headline)
+                            QRCodeView(value: pairing.invitation)
+                                .frame(width: 200, height: 200)
+                            Button("Copy Pairing Link") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(pairing.invitation, forType: .string)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    } else {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Waiting for your phone…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Button("Cancel Pairing", role: .cancel, action: model.cancelRemotePairing)
+                        .disabled(model.isLoadingFeatures)
+                } else {
+                    Button("Create Pairing Code", action: model.beginRemotePairing)
+                        .disabled(model.isLoadingFeatures)
                 }
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func deviceStatus(_ device: LinkedDevice) -> String {
+        switch device.state {
+        case .local:
+            return "This Mac"
+        case .starting:
+            return "Starting connection…"
+        case .connecting:
+            return "Waiting for phone…"
+        case let .pendingConfirmation(code):
+            return code.isEmpty ? "Waiting for confirmation…" : "Compare code \(code)"
+        case .confirmed:
+            return "Confirmed on phone…"
+        case .connected:
+            return "Connected"
+        case let .stopped(reason):
+            return reason ?? "Not connected"
+        }
+    }
+
+    private func deviceActionTitle(_ device: LinkedDevice) -> String? {
+        switch device.state {
+        case .connected:
+            return "Use"
+        case .stopped:
+            return "Connect"
+        case .local, .starting, .connecting, .pendingConfirmation, .confirmed:
+            return nil
+        }
     }
 }
 

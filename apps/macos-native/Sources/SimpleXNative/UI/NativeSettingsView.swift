@@ -8,6 +8,7 @@ struct NativeSettingsView: View {
     @State private var confirmPassphrase = ""
     @State private var rememberNewPassphrase = true
     @State private var confirmImport = false
+    @State private var migrationRequest: DeviceMigrationMode?
 
     var body: some View {
         TabView {
@@ -38,6 +39,12 @@ struct NativeSettingsView: View {
             Text(model.settingsError ?? "")
         }
         .task { model.loadAdvancedSettings() }
+        .sheet(item: $migrationRequest) { mode in
+            DeviceMigrationView(
+                coordinator: model.deviceMigrationCoordinator,
+                initialMode: mode
+            )
+        }
     }
 
     private var general: some View {
@@ -187,6 +194,17 @@ struct NativeSettingsView: View {
                 Button("Export Encrypted Database…", action: model.exportDatabase)
                 Button("Import Database…", role: .destructive) { confirmImport = true }
                 Button("Show Database Folder", action: model.openDatabaseFolder)
+            }
+            Section("Move Between Devices") {
+                Button("Import from Phone with QR Code…") {
+                    migrationRequest = .importFromPhone
+                }
+                Button("Export to Phone with QR Code…") {
+                    migrationRequest = .exportToPhone
+                }
+                Text("Transfers use an encrypted archive and a one-time SimpleX file link.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

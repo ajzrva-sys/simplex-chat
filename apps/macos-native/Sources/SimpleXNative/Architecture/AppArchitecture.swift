@@ -40,6 +40,7 @@ enum RemoteHostState: Hashable, Sendable {
     case starting
     case connecting(invitation: String)
     case pendingConfirmation(code: String)
+    case confirmed(code: String)
     case connected(code: String?)
     case stopped(reason: String?)
 }

@@ -82,7 +82,7 @@ final class NativeNotificationManager: NSObject, ObservableObject, UNUserNotific
         guard !NativeNotificationParser.shouldSuppress(
             windowFocused: windowFocused,
             activeUserID: model.profile?.userID,
-            activeRemoteHostID: nil,
+            activeRemoteHostID: model.currentRemoteHostID,
             activeChatID: model.selectedChatID,
             route: payload.route
         ) else {
@@ -142,7 +142,7 @@ final class NativeNotificationManager: NSObject, ObservableObject, UNUserNotific
             if NativeNotificationParser.shouldSuppress(
                 windowFocused: focused,
                 activeUserID: model.profile?.userID,
-                activeRemoteHostID: nil,
+                activeRemoteHostID: model.currentRemoteHostID,
                 activeChatID: model.selectedChatID,
                 route: route
             ) {

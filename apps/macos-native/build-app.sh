@@ -5,6 +5,7 @@ SCRIPT_DIR=${0:A:h}
 REPO_ROOT=${SCRIPT_DIR:h:h}
 CORE_LIB_DIR=${SIMPLEX_CORE_LIB_DIR:-${REPO_ROOT}/apps/multiplatform/release/main/app/SimpleX.app/Contents/app/resources}
 OUTPUT_DIR=${NATIVE_CHAT_OUTPUT_DIR:-/private/tmp/native-chat-build}
+SWIFT_BUILD_DIR=${OUTPUT_DIR}/swift-build
 APP_DIR=${OUTPUT_DIR}/Native\ Chat.app
 SIGN_IDENTITY=${NATIVE_CHAT_SIGN_IDENTITY:--}
 APP_VERSION=${NATIVE_CHAT_VERSION:-0.2.1}
@@ -25,7 +26,8 @@ if [[ ! -f ${CORE_LIB_DIR}/libsimplex.dylib ]]; then
 fi
 
 env CLANG_MODULE_CACHE_PATH=${OUTPUT_DIR}/clang-cache SWIFTPM_MODULECACHE_OVERRIDE=${OUTPUT_DIR}/swiftpm-cache \
-  swift build --disable-sandbox --package-path ${SCRIPT_DIR} -c release --arch arm64 --product SimpleXNative
+  swift build --disable-sandbox --package-path ${SCRIPT_DIR} --scratch-path ${SWIFT_BUILD_DIR} \
+    -c release --arch arm64 --product SimpleXNative
 
 if [[ -d ${APP_DIR} ]]; then
   BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -33,7 +35,7 @@ if [[ -d ${APP_DIR} ]]; then
 fi
 
 mkdir -p ${APP_DIR}/Contents/MacOS ${APP_DIR}/Contents/Frameworks ${APP_DIR}/Contents/Resources
-cp ${SCRIPT_DIR}/.build/arm64-apple-macosx/release/SimpleXNative ${APP_DIR}/Contents/MacOS/NativeChat
+cp ${SWIFT_BUILD_DIR}/arm64-apple-macosx/release/SimpleXNative ${APP_DIR}/Contents/MacOS/NativeChat
 cp ${CORE_LIB_DIR}/*.dylib ${APP_DIR}/Contents/Frameworks/
 ICONSET=${OUTPUT_DIR}/NativeChat.iconset
 rm -rf ${ICONSET}
@@ -66,7 +68,7 @@ plutil -insert LSMinimumSystemVersion -string 14.0 ${APP_DIR}/Contents/Info.plis
 plutil -insert NSHighResolutionCapable -bool YES ${APP_DIR}/Contents/Info.plist
 plutil -insert NSHumanReadableCopyright -string "Copyright © 2026 Native Chat contributors" ${APP_DIR}/Contents/Info.plist
 plutil -insert NSPrincipalClass -string NSApplication ${APP_DIR}/Contents/Info.plist
-plutil -insert NSCameraUsageDescription -string "Native Chat uses the camera for video calls." ${APP_DIR}/Contents/Info.plist
+plutil -insert NSCameraUsageDescription -string "Native Chat uses the camera for video calls and scanning SimpleX QR codes." ${APP_DIR}/Contents/Info.plist
 plutil -insert NSMicrophoneUsageDescription -string "Native Chat uses the microphone for calls and voice messages." ${APP_DIR}/Contents/Info.plist
 plutil -insert NativeChatKeychainPassphraseStorageEnabled -bool YES ${APP_DIR}/Contents/Info.plist
 plutil -insert NativeChatSourceRepository -string ${SOURCE_REPOSITORY} ${APP_DIR}/Contents/Info.plist

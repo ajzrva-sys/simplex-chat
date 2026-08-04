@@ -20,6 +20,8 @@ private final class SimpleXControllerHandle: @unchecked Sendable {
 
 actor SimpleXCore {
     private var controller: SimpleXControllerHandle?
+    private var migrationController: SimpleXControllerHandle?
+    private var migrationDatabasePrefix: URL?
     private var activeRemoteHostID: Int64?
     private var loaded = false
     private let decryptedFilesDirectory: URL
@@ -33,6 +35,11 @@ actor SimpleXCore {
 
     deinit {
         try? FileManager.default.removeItem(at: decryptedFilesDirectory)
+    }
+
+    var migrationFilesDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/simplex/migration_temp_files", isDirectory: true)
     }
 
     func open(passphrase: String) throws -> (NativeProfile, [NativeChat]) {
@@ -174,13 +181,20 @@ actor SimpleXCore {
         case .document:
             messageContent = ["type": "file", "text": caption]
         }
+        let fileSource: NativeCryptoFile
+        if let activeRemoteHostID {
+            fileSource = try storeRemoteFile(
+                remoteHostID: activeRemoteHostID,
+                storeEncrypted: attachment.kind == .video ? false : nil,
+                localPath: attachment.url.path
+            )
+        } else {
+            fileSource = NativeCryptoFile(filePath: attachment.url.path, cryptoArgs: nil)
+        }
         return try sendComposedMessage(
             Self.composedMessage(
                 messageContent: messageContent,
-                fileSource: [
-                    "filePath": attachment.url.path,
-                    "cryptoArgs": NSNull(),
-                ],
+                fileSource: PeopleAndDevicesParser.cryptoFileObject(fileSource),
                 quotedItemID: quotedItemID
             ),
             to: chat
@@ -310,6 +324,101 @@ actor SimpleXCore {
         return response.data(using: .utf8)
     }
 
+    func startMigrationController(networkConfigurationJSON: String) throws -> Int64 {
+        try loadIfNeeded()
+        closeMigrationController()
+        try FileManager.default.createDirectory(
+            at: migrationFilesDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let prefix = migrationFilesDirectory
+            .appendingPathComponent("migration-\(UUID().uuidString)")
+        var rawController: UnsafeMutableRawPointer?
+        let migration = prefix.path.withCString { path in
+            "".withCString { key in
+                "yesUp".withCString { confirmation in
+                    sx_core_migrate_init(path, key, confirmation, &rawController)
+                }
+            }
+        }
+        let migrationData = try data(from: migration)
+        guard NativeChatParser.migrationSucceeded(migrationData), let rawController else {
+            throw NativeChatError.core(NativeChatParser.migrationError(from: migrationData))
+        }
+
+        migrationController = SimpleXControllerHandle(rawController)
+        migrationDatabasePrefix = prefix
+        do {
+            let newUser: [String: Any] = [
+                "profile": ["displayName": "Temp", "fullName": ""],
+                "pastTimestamp": false,
+            ]
+            let newUserData = try JSONSerialization.data(withJSONObject: newUser)
+            guard let newUserJSON = String(data: newUserData, encoding: .utf8) else {
+                throw NativeChatError.invalidResponse("The temporary profile could not be encoded.")
+            }
+            let profile = try NativeChatParser.profile(
+                from: sendMigrationCommand("/_create user \(newUserJSON)")
+            )
+            try NativeChatParser.validateCommandResponse(
+                sendMigrationCommand("/_network \(networkConfigurationJSON)")
+            )
+            try configureMigrationFilePaths()
+            try NativeChatParser.validateCommandResponse(
+                sendMigrationCommand("/_start main=on snd_files=on")
+            )
+            return profile.userID
+        } catch {
+            closeMigrationController()
+            throw error
+        }
+    }
+
+    func sendMigrationCommand(_ command: String) throws -> Data {
+        guard let migrationController else {
+            throw NativeChatError.unavailable("The temporary migration profile is not open.")
+        }
+        let result = command.withCString { commandPointer in
+            sx_core_send_cmd(migrationController.pointer, commandPointer, 0)
+        }
+        return try data(from: result)
+    }
+
+    func receiveMigrationEvent(timeoutMicroseconds: Int32 = 500_000) -> Data? {
+        guard let migrationController,
+              let pointer = sx_core_recv_msg_wait(migrationController.pointer, timeoutMicroseconds) else {
+            return nil
+        }
+        defer { sx_core_free(pointer) }
+        guard let response = String(validatingUTF8: pointer), !response.isEmpty else { return nil }
+        return response.data(using: .utf8)
+    }
+
+    func closeMigrationController() {
+        migrationController = nil
+        guard let prefix = migrationDatabasePrefix else { return }
+        migrationDatabasePrefix = nil
+        try? FileManager.default.removeItem(atPath: prefix.path + "_chat.db")
+        try? FileManager.default.removeItem(atPath: prefix.path + "_agent.db")
+    }
+
+    func cleanUpMigrationFiles() {
+        closeMigrationController()
+        try? FileManager.default.removeItem(at: migrationFilesDirectory)
+    }
+
+    func resetAndOpen(passphrase: String) throws -> (NativeProfile, [NativeChat]) {
+        controller = nil
+        activeRemoteHostID = nil
+        return try open(passphrase: passphrase)
+    }
+
+    func discardMainControllerAfterMigration() {
+        controller = nil
+        activeRemoteHostID = nil
+    }
+
     private func sendComposedMessage(_ message: [String: Any], to chat: NativeChat) throws -> NativeSendReceipt {
         let response = try send(Self.sendCommand(message: message, to: chat))
         if message["quotedItemId"] != nil,
@@ -392,6 +501,29 @@ actor SimpleXCore {
             throw NativeChatError.invalidResponse("The app file paths could not be encoded.")
         }
         try ensureCommandSucceeded(send("/set file paths \(json)"))
+    }
+
+    private func configureMigrationFilePaths() throws {
+        let dataDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/simplex", isDirectory: true)
+        let assets = dataDirectory.appendingPathComponent("simplex_v1_assets", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: migrationFilesDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+        let paths = [
+            "appFilesFolder": migrationFilesDirectory.path,
+            "appTempFolder": migrationFilesDirectory.path,
+            "appAssetsFolder": assets.path,
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: paths)
+        guard let json = String(data: encoded, encoding: .utf8) else {
+            throw NativeChatError.invalidResponse("The migration file paths could not be encoded.")
+        }
+        try NativeChatParser.validateCommandResponse(
+            sendMigrationCommand("/set file paths \(json)")
+        )
     }
 
     func sendCommand(_ command: String, remoteHostID: Int64? = nil, forceLocal: Bool = false) throws -> Data {
