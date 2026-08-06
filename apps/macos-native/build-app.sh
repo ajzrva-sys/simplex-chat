@@ -37,6 +37,9 @@ fi
 mkdir -p ${APP_DIR}/Contents/MacOS ${APP_DIR}/Contents/Frameworks ${APP_DIR}/Contents/Resources
 cp ${SWIFT_BUILD_DIR}/arm64-apple-macosx/release/SimpleXNative ${APP_DIR}/Contents/MacOS/NativeChat
 cp ${CORE_LIB_DIR}/*.dylib ${APP_DIR}/Contents/Frameworks/
+if [[ -d ${SWIFT_BUILD_DIR}/arm64-apple-macosx/release/Sparkle.framework ]]; then
+  cp -R ${SWIFT_BUILD_DIR}/arm64-apple-macosx/release/Sparkle.framework ${APP_DIR}/Contents/Frameworks/
+fi
 ICONSET=${OUTPUT_DIR}/NativeChat.iconset
 rm -rf ${ICONSET}
 mkdir -p ${ICONSET}
@@ -77,9 +80,15 @@ plutil -insert NativeChatSourceURL -string ${SOURCE_URL} ${APP_DIR}/Contents/Inf
 plutil -insert NativeChatDevelopmentBuild -bool ${DEVELOPMENT_BUILD} ${APP_DIR}/Contents/Info.plist
 
 xattr -cr ${APP_DIR}
+# Add rpath for embedded frameworks
+install_name_tool -add_rpath @executable_path/../Frameworks ${APP_DIR}/Contents/MacOS/NativeChat 2>/dev/null || true
 for library in ${APP_DIR}/Contents/Frameworks/*.dylib; do
   codesign --force --sign ${SIGN_IDENTITY} ${library}
 done
+# Sign Sparkle framework if present
+if [[ -d ${APP_DIR}/Contents/Frameworks/Sparkle.framework ]]; then
+  codesign --force --sign ${SIGN_IDENTITY} ${APP_DIR}/Contents/Frameworks/Sparkle.framework
+fi
 codesign --force --entitlements ${SCRIPT_DIR}/NativeChat.entitlements --sign ${SIGN_IDENTITY} ${APP_DIR}/Contents/MacOS/NativeChat
 codesign --force --entitlements ${SCRIPT_DIR}/NativeChat.entitlements --sign ${SIGN_IDENTITY} ${APP_DIR}
 codesign --verify --deep --strict ${APP_DIR}

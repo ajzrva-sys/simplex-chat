@@ -34,6 +34,7 @@ private func menuBarTestChat(id: String, unreadCount: Int) -> NativeChat {
         preview: "",
         timestamp: nil,
         unreadCount: unreadCount,
-        sendAsGroup: false
+        sendAsGroup: false,
+        chatTagIds: []
     )
 }

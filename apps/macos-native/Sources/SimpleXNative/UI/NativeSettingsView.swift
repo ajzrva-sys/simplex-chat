@@ -9,6 +9,7 @@ struct NativeSettingsView: View {
     @State private var rememberNewPassphrase = true
     @State private var confirmImport = false
     @State private var migrationRequest: DeviceMigrationMode?
+    @State private var showSetAppPasscode = false
 
     var body: some View {
         TabView {
@@ -45,12 +46,18 @@ struct NativeSettingsView: View {
                 initialMode: mode
             )
         }
+        .sheet(isPresented: $showAppearanceSettings) {
+            AppearanceSettingsView(model: model)
+        }
     }
+
+    @State private var showAppearanceSettings = false
+    @AppStorage("nativeChat.updateChannel") private var updateChannel = "stable"
 
     private var general: some View {
         Form {
             Section("Interface") {
-                LabeledContent("Appearance", value: "Follows macOS")
+                Button("Appearance…") { showAppearanceSettings = true }
                 LabeledContent("Profile", value: model.profile?.displayName ?? "Locked")
                 Picker("Chat density", selection: $model.density) {
                     ForEach(DesktopChatDensity.allCases) { density in
@@ -66,17 +73,37 @@ struct NativeSettingsView: View {
                     model.featureCenterPresented = true
                 }
             }
+            Section("Updates") {
+                Picker("Update channel", selection: $updateChannel) {
+                    Text("Stable").tag("stable")
+                    Text("Beta").tag("beta")
+                    Text("Disabled").tag("disabled")
+                }
+            }
         }
         .formStyle(.grouped)
     }
 
     private var privacy: some View {
         Form {
+            Section("App Lock") {
+                LabeledContent("App passcode", value: model.appPasscodeEnabled ? "Enabled" : "Disabled")
+                LabeledContent("Self-destruct passcode", value: model.selfDestructPasscodeEnabled ? "Set" : "Not set")
+                Button(model.appPasscodeEnabled ? "Change App Passcode" : "Set App Passcode") {
+                    showSetAppPasscode = true
+                }
+            }
             Section("Message Content") {
                 Toggle("Show link previews", isOn: $model.settingsSnapshot.showLinkPreviews)
                 Toggle("Remove tracking information from links", isOn: $model.settingsSnapshot.sanitizeLinks)
                 Toggle("Automatically accept images", isOn: $model.settingsSnapshot.autoAcceptImages)
                 Toggle("Show encryption indicators", isOn: $model.settingsSnapshot.showEncryptionIndicators)
+                Picker("Media blur", selection: $model.settingsSnapshot.mediaBlurRadius) {
+                    Text("Off").tag(0)
+                    Text("Soft").tag(12)
+                    Text("Medium").tag(24)
+                    Text("Strong").tag(48)
+                }
             }
             Section("Files and Network Privacy") {
                 Toggle("Encrypt local files", isOn: $model.settingsSnapshot.encryptLocalFiles)
@@ -99,6 +126,9 @@ struct NativeSettingsView: View {
                 .disabled(model.isSavingSettings)
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showSetAppPasscode) {
+            SetAppPasscodeView(model: model)
+        }
     }
 
     private var notificationsView: some View {

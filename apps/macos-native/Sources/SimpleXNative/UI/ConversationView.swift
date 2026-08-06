@@ -8,6 +8,8 @@ struct ConversationView: View {
     @FocusState private var composerFocused: Bool
     @FocusState private var transcriptFocused: Bool
     @State private var dropTargeted = false
+    @State private var blurredMessageIDs: Set<Int64> = []
+    @State private var wallpaperSettings = ChatWallpaperSettings.default
 
     var body: some View {
         Group {
@@ -56,6 +58,17 @@ struct ConversationView: View {
                 .sheet(isPresented: $model.chatDetailsPresented) {
                     ChatDetailsView(model: model, chat: chat)
                 }
+                .sheet(item: $model.tagAssignmentChat) { tagChat in
+                    TagListView(model: model, chat: tagChat)
+                }
+                .sheet(isPresented: Binding(
+                    get: { model.messageInfoData != nil && model.messageInfoMessage != nil },
+                    set: { if !$0 { model.messageInfoData = nil; model.messageInfoMessage = nil } }
+                )) {
+                    if let info = model.messageInfoData, let msg = model.messageInfoMessage, let infoChat = model.messageInfoChat {
+                        MessageInfoView(message: msg, chat: infoChat, info: info)
+                    }
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Conversation Selected", systemImage: "bubble.left.and.bubble.right")
@@ -72,6 +85,9 @@ struct ConversationView: View {
         }
         .onChange(of: model.composerFocusRequest) { _, _ in
             composerFocused = true
+        }
+        .onChange(of: model.selectedChatID) { _, chatID in
+            loadWallpaper(for: chatID)
         }
         .quickLookPreview($model.quickLookURL)
     }
@@ -157,7 +173,18 @@ struct ConversationView: View {
                             inlineImageURL: model.inlineImageURL(message.id),
                             transferOperation: message.fileID.flatMap(model.fileTransfers.operation),
                             canReply: model.canReply(to: message),
-                            canOpenQuote: model.canNavigateConversationHistory
+                            canOpenQuote: model.canNavigateConversationHistory,
+                            mediaBlurRadius: model.settingsSnapshot.mediaBlurRadius,
+                            isBlurred: blurredMessageIDs.contains(message.id),
+                            onHoverMedia: { hovering in
+                                let radius = model.settingsSnapshot.mediaBlurRadius
+                                guard radius > 0 else { return }
+                                if hovering {
+                                    blurredMessageIDs.remove(message.id)
+                                } else {
+                                    blurredMessageIDs.insert(message.id)
+                                }
+                            }
                         ) {
                             transcriptFocused = true
                             model.selectMessage(message.id, modifiers: NSApp.currentEvent?.modifierFlags ?? [])
@@ -186,6 +213,8 @@ struct ConversationView: View {
                             model.cancelAttachmentTransfer(message)
                         } react: { emoji in
                             model.toggleReaction(emoji, on: message)
+                        } info: {
+                            model.presentMessageInfo(message, chat: chat)
                         }
                         .id(message.id)
                     }
@@ -194,6 +223,10 @@ struct ConversationView: View {
                 .padding(.vertical, 16)
             }
             .defaultScrollAnchor(.bottom)
+            .background {
+                ChatWallpaperBackground(settings: wallpaperSettings)
+                    .ignoresSafeArea()
+            }
             .background(Color(nsColor: .textBackgroundColor))
             .focusable()
             .focused($transcriptFocused)
@@ -216,6 +249,12 @@ struct ConversationView: View {
                 proxy.scrollTo(targetID, anchor: .center)
                 model.targetMessageID = nil
             }
+            .onChange(of: model.messages.map(\.id)) { _, _ in
+                syncBlurredIDs()
+            }
+            .onChange(of: model.settingsSnapshot.mediaBlurRadius) { _, _ in
+                syncBlurredIDs()
+            }
             .onKeyPress(.upArrow) {
                 model.moveMessageSelection(by: -1)
                 return .handled
@@ -237,6 +276,29 @@ struct ConversationView: View {
                 model.dismissNearestState()
                 return .handled
             }
+        }
+    }
+
+    private func loadWallpaper(for chatID: String?) {
+        guard let chatID else {
+            wallpaperSettings = .default
+            return
+        }
+        wallpaperSettings = ChatWallpaperStore.settings(for: chatID)
+    }
+
+    private func syncBlurredIDs() {
+        let radius = model.settingsSnapshot.mediaBlurRadius
+        if radius > 0 {
+            let mediaIDs = Set(model.messages.filter { msg in
+                switch msg.content {
+                case .image, .video, .link: return true
+                default: return false
+                }
+            }.map(\.id))
+            blurredMessageIDs = mediaIDs
+        } else {
+            blurredMessageIDs.removeAll()
         }
     }
 
@@ -308,6 +370,25 @@ struct ConversationView: View {
                 Divider()
             }
 
+            if model.pendingLinkPreview != nil || model.isLoadingLinkPreview {
+                ComposeLinkPreviewView(
+                    preview: model.pendingLinkPreview,
+                    isLoading: model.isLoadingLinkPreview,
+                    cancel: model.cancelLinkPreview
+                )
+                Divider()
+            }
+
+            if model.showBotCommands {
+                BotCommandsMenuView(
+                    commands: model.botCommands,
+                    filter: model.botCommandFilter,
+                    onSelect: { model.selectBotCommand($0) }
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
+            }
+
             HStack(alignment: .bottom, spacing: 8) {
                 Menu {
                     Button("Choose Files…", action: model.chooseAttachments)
@@ -330,6 +411,12 @@ struct ConversationView: View {
                     .lineLimit(1...8)
                     .focused($composerFocused)
                     .accessibilityIdentifier("composer.message")
+                    .onChange(of: model.draft) { _, newValue in
+                        model.checkForLinkPreview(newValue)
+                        if newValue.hasPrefix("/") && model.botCommands.isEmpty {
+                            Task { await model.loadBotCommands() }
+                        }
+                    }
                     .padding(.horizontal, 12)
                     .padding(.vertical, model.density.tokens.composerPadding)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -685,6 +772,9 @@ private struct MessageRow: View {
     let transferOperation: FileTransferViewModel.Operation?
     let canReply: Bool
     let canOpenQuote: Bool
+    let mediaBlurRadius: Int
+    let isBlurred: Bool
+    let onHoverMedia: (Bool) -> Void
     let select: () -> Void
     let copy: () -> Void
     let delete: () -> Void
@@ -696,6 +786,7 @@ private struct MessageRow: View {
     let retryAttachment: () -> Void
     let cancelAttachment: () -> Void
     let react: (String) -> Void
+    let info: () -> Void
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -785,6 +876,8 @@ private struct MessageRow: View {
             }
             Button("Copy", action: copy)
             Button(selected ? "Deselect Message" : "Select Message", action: select)
+            Divider()
+            Button("Info…", action: info)
             if message.deletable {
                 Divider()
                 Button("Delete…", role: .destructive, action: delete)
@@ -802,6 +895,9 @@ private struct MessageRow: View {
             inlineImageURL: inlineImageURL,
             transferOperation: transferOperation,
             canOpenQuote: canOpenQuote,
+            mediaBlurRadius: mediaBlurRadius,
+            isBlurred: isBlurred,
+            onHoverMedia: onHoverMedia,
             openQuote: openQuote,
             openAttachment: openAttachment,
             prepareInlineAudio: prepareInlineAudio,
@@ -1135,6 +1231,9 @@ private struct MessageContentView: View {
     let inlineImageURL: URL?
     let transferOperation: FileTransferViewModel.Operation?
     let canOpenQuote: Bool
+    let mediaBlurRadius: Int
+    let isBlurred: Bool
+    let onHoverMedia: (Bool) -> Void
     let openQuote: (NativeQuote) -> Void
     let openAttachment: () -> Void
     let prepareInlineAudio: () -> Void
@@ -1364,6 +1463,8 @@ private struct MessageContentView: View {
         .aspectRatio(16 / 9, contentMode: .fit)
         .frame(maxWidth: 480)
         .clipped()
+        .blur(radius: isBlurred ? CGFloat(mediaBlurRadius) : 0)
+        .onHover { onHoverMedia($0) }
     }
 
     private func linkPreviewMetadata(_ preview: NativeLinkPreview) -> some View {
@@ -1431,6 +1532,8 @@ private struct MessageContentView: View {
         }
         .frame(maxWidth: 420, maxHeight: 320)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .blur(radius: isBlurred ? CGFloat(mediaBlurRadius) : 0)
+        .onHover { onHoverMedia($0) }
 
         if attachmentIsActionable {
             Button(action: openAttachment) {

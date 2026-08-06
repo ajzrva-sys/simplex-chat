@@ -126,6 +126,9 @@ struct SettingsSnapshot: Equatable, Sendable {
     var notificationPreviewMode: NotificationPreviewMode = .message
     var notificationSounds = true
     var messageRetentionDays: Int?
+    var mediaBlurRadius: Int = 0
+    var accentColorName: String = "default"
+    var fontScale: Double = 1.0
 }
 
 @MainActor

@@ -5,8 +5,8 @@ import PackageDescription
 let package = Package(
     name: "SimpleXNative",
     platforms: [.macOS(.v14)],
-    products: [
-        .executable(name: "SimpleXNative", targets: ["SimpleXNative"]),
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
         .target(
@@ -16,7 +16,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "SimpleXNative",
-            dependencies: ["CoreBridge"]
+            dependencies: ["CoreBridge", "Sparkle"]
         ),
         .testTarget(
             name: "SimpleXNativeTests",

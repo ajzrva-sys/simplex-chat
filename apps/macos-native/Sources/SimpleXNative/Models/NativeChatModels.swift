@@ -43,6 +43,7 @@ struct NativeChat: Identifiable, Hashable, Sendable {
     let timestamp: Date?
     let unreadCount: Int
     let sendAsGroup: Bool
+    var chatTagIds: [Int64]
 
     var accessibilityDescription: String {
         let unread = unreadCount == 0 ? "" : ", \(unreadCount) unread"
@@ -60,7 +61,8 @@ struct NativeChat: Identifiable, Hashable, Sendable {
             preview: preview,
             timestamp: timestamp,
             unreadCount: 0,
-            sendAsGroup: sendAsGroup
+            sendAsGroup: sendAsGroup,
+            chatTagIds: chatTagIds
         )
     }
 
@@ -807,6 +809,8 @@ enum NativeChatParser {
         case .group: groupSendsAsGroup(info: info, groupInfo: payload)
         default: bool(payload["sendAsGroup"]) ?? false
         }
+        let chatTagIds = (object["chatTags"] as? [NSNumber] ?? []).map { $0.int64Value }
+
         return NativeChat(
             id: "\(kind.rawValue)\(apiID)",
             apiID: apiID,
@@ -816,7 +820,8 @@ enum NativeChatParser {
             preview: string(lastMeta?["itemText"]) ?? "",
             timestamp: date(lastMeta?["itemTs"]),
             unreadCount: int(stats?["unreadCount"]) ?? 0,
-            sendAsGroup: sendAsGroup
+            sendAsGroup: sendAsGroup,
+            chatTagIds: chatTagIds
         )
     }
 
@@ -1030,6 +1035,171 @@ enum NativeChatError: LocalizedError, Sendable {
         switch self {
         case let .core(message), let .invalidResponse(message), let .unavailable(message): message
         case .replyTargetUnavailable: "The message being replied to is no longer available."
+        }
+    }
+}
+
+struct ServersSummary: Sendable {
+    let smpServers: [ServerSummary]
+    let xftpServers: [ServerSummary]
+}
+
+struct ServerSummary: Identifiable, Sendable {
+    var id: String { server }
+    let server: String
+    let connected: Int
+    let errors: Int
+    let connecting: Int
+    let activeSubs: Int
+    let deletedSubs: Int
+    let sentDirect: Int
+    let sentViaProxy: Int
+    let sentProxied: Int
+    let recvDirect: Int
+    let recvViaProxy: Int
+    let recvProxied: Int
+
+    var totalSubs: Int { activeSubs + deletedSubs }
+    var totalSent: Int { sentDirect + sentViaProxy + sentProxied }
+    var totalRecv: Int { recvDirect + recvViaProxy + recvProxied }
+    var isHealthy: Bool { errors == 0 && connecting == 0 }
+}
+
+enum ReportReason: String, Sendable, CaseIterable {
+    case spam
+    case illegal
+    case community
+    case profile
+    case other
+
+    var label: String {
+        switch self {
+        case .spam: "Spam"
+        case .illegal: "Illegal content"
+        case .community: "Community guidelines"
+        case .profile: "Profile issue"
+        case .other: "Other"
+        }
+    }
+}
+
+struct ChatItemInfo: Sendable {
+    let itemVersions: [ChatItemVersion]
+    let memberDeliveryStatuses: [MemberDeliveryStatus]?
+}
+
+struct ChatItemVersion: Identifiable, Sendable {
+    let id: Int64
+    let msgContent: [String: Any]
+    let itemVersionTs: String
+    let createdAt: String
+
+    var displayText: String {
+        (msgContent["text"] as? String) ?? ""
+    }
+}
+
+struct MemberDeliveryStatus: Identifiable, Sendable {
+    var id: Int64 { groupMemberId }
+    let groupMemberId: Int64
+    let memberDisplayName: String
+    let status: GroupSndStatus
+    let sentViaProxy: Bool?
+}
+
+enum GroupSndStatus: Sendable {
+    case new, forwarded, inactive, sent, rcvdOk, rcvdBadHash, error, warning
+
+    var icon: String {
+        switch self {
+        case .new: "ellipsis"
+        case .forwarded: "chevron.right"
+        case .inactive: "person.slash"
+        case .sent: "checkmark"
+        case .rcvdOk: "checkmark.circle"
+        case .rcvdBadHash: "exclamationmark.triangle"
+        case .error: "xmark.circle"
+        case .warning: "exclamationmark.triangle.fill"
+        }
+    }
+
+    var color: String {
+        switch self {
+        case .new: "secondary"
+        case .forwarded: "secondary"
+        case .inactive: "secondary"
+        case .sent: "secondary"
+        case .rcvdOk: "green"
+        case .rcvdBadHash: "orange"
+        case .error: "red"
+        case .warning: "orange"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .new: "Pending"
+        case .forwarded: "Forwarded"
+        case .inactive: "Inactive"
+        case .sent: "Sent"
+        case .rcvdOk: "Received"
+        case .rcvdBadHash: "Bad hash"
+        case .error: "Error"
+        case .warning: "Warning"
+        }
+    }
+
+    static func from(_ value: String?) -> GroupSndStatus {
+        switch value {
+        case "new": .new
+        case "forwarded": .forwarded
+        case "inactive": .inactive
+        case "sent": .sent
+        case "rcvd_ok": .rcvdOk
+        case "rcvd_bad_hash": .rcvdBadHash
+        case "error": .error
+        case "warning": .warning
+        default: .new
+        }
+    }
+}
+
+enum ChatBotCommand: Identifiable, Sendable {
+    case command(keyword: String, label: String, params: String?)
+    case menu(label: String, commands: [ChatBotCommand])
+
+    var id: String {
+        switch self {
+        case .command(let keyword, _, _): "cmd:\(keyword)"
+        case .menu(let label, _): "menu:\(label)"
+        }
+    }
+
+    var displayLabel: String {
+        switch self {
+        case .command(let keyword, let label, _): "/\(keyword) — \(label)"
+        case .menu(let label, _): "\(label) ▸"
+        }
+    }
+
+    static func parseCommands(from value: Any?) -> [ChatBotCommand] {
+        guard let items = value as? [[String: Any]] else { return [] }
+        return items.compactMap(parseCommand)
+    }
+
+    private static func parseCommand(_ obj: [String: Any]) -> ChatBotCommand? {
+        guard let type = obj["type"] as? String else { return nil }
+        switch type {
+        case "command":
+            guard let keyword = obj["keyword"] as? String,
+                  let label = obj["label"] as? String else { return nil }
+            return .command(keyword: keyword, label: label, params: obj["params"] as? String)
+        case "menu":
+            guard let label = obj["label"] as? String else { return nil }
+            let commands = parseCommands(from: obj["commands"])
+            return .menu(label: label, commands: commands)
+        default:
+            return nil
         }
     }
 }

@@ -4,16 +4,20 @@ struct SidebarView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        List(selection: Binding(
-            get: { model.selectedChatID },
-            set: { model.selectChat($0) }
-        )) {
-            ForEach(model.filteredChats) { chat in
-                ChatSidebarRow(chat: chat, density: model.density)
-                    .tag(chat.id)
+        VStack(spacing: 0) {
+            TagFilterBar(model: model)
+
+            List(selection: Binding(
+                get: { model.selectedChatID },
+                set: { model.selectChat($0) }
+            )) {
+                ForEach(model.filteredChats) { chat in
+                    ChatSidebarRow(chat: chat, density: model.density)
+                        .tag(chat.id)
+                }
             }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
         .overlay {
             if model.filteredChats.isEmpty {
                 if model.searchText.isEmpty {
@@ -54,7 +58,16 @@ struct SidebarView: View {
                 .accessibilityLabel("Profile and Settings")
                 .accessibilityInputLabels(["Profile and Settings", "Profile", "Settings"])
             }
-
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    model.showServersSummary = true
+                } label: {
+                    Image(systemName: "server.rack")
+                        .foregroundStyle(.secondary)
+                }
+                .help("Servers")
+                .accessibilityLabel("Servers")
+            }
         }
     }
 }

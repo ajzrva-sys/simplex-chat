@@ -19,8 +19,8 @@ extension SimpleXCore {
         try NativeChatParser.validateCommandResponse(sendCommand("/_ttl \(userID) \(value)"))
     }
 
-    func networkConfigurationJSON() throws -> String {
-        try resultJSON(command: "/network", expectedType: "networkConfig", valueKey: "networkConfig")
+    func networkConfigurationJSON(forceLocal: Bool = false) throws -> String {
+        try resultJSON(command: "/network", expectedType: "networkConfig", valueKey: "networkConfig", forceLocal: forceLocal)
     }
 
     func saveNetworkConfiguration(json: String) throws {
@@ -43,14 +43,14 @@ extension SimpleXCore {
         try NativeChatParser.validateCommandResponse(sendCommand("/reconnect"))
     }
 
-    func exportDatabase(to archivePath: String) throws {
+    func exportDatabase(to archivePath: String, forceLocal: Bool = false) throws {
         let payload = try Self.jsonString(["archivePath": archivePath])
-        try NativeChatParser.validateCommandResponse(sendCommand("/_db export \(payload)"))
+        try NativeChatParser.validateCommandResponse(sendCommand("/_db export \(payload)", forceLocal: forceLocal))
     }
 
-    func importDatabase(from archivePath: String) throws {
+    func importDatabase(from archivePath: String, forceLocal: Bool = false) throws {
         let payload = try Self.jsonString(["archivePath": archivePath])
-        try NativeChatParser.validateCommandResponse(sendCommand("/_db import \(payload)"))
+        try NativeChatParser.validateCommandResponse(sendCommand("/_db import \(payload)", forceLocal: forceLocal))
     }
 
     func changeDatabasePassphrase(current: String, new: String) throws {
@@ -58,8 +58,8 @@ extension SimpleXCore {
         try NativeChatParser.validateCommandResponse(sendCommand("/_db encryption \(payload)"))
     }
 
-    private func resultJSON(command: String, expectedType: String, valueKey: String) throws -> String {
-        let data = try sendCommand(command)
+    private func resultJSON(command: String, expectedType: String, valueKey: String, forceLocal: Bool = false) throws -> String {
+        let data = try sendCommand(command, forceLocal: forceLocal)
         try NativeChatParser.validateCommandResponse(data, expectedType: expectedType)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = root["result"] as? [String: Any],
@@ -84,7 +84,7 @@ extension SimpleXCore {
         }
     }
 
-    private static func jsonString(_ value: [String: Any]) throws -> String {
+    static func jsonString(_ value: [String: Any]) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: value)
         guard let string = String(data: data, encoding: .utf8) else {
             throw NativeChatError.invalidResponse("The database operation could not be encoded.")
@@ -113,6 +113,9 @@ enum NativeSettingsPersistence {
         value.deliveryReceiptsContacts = object["deliveryReceiptsContacts"] as? Bool ?? value.deliveryReceiptsContacts
         value.deliveryReceiptsGroups = object["deliveryReceiptsGroups"] as? Bool ?? value.deliveryReceiptsGroups
         value.messageRetentionDays = object["messageRetentionDays"] as? Int
+        value.mediaBlurRadius = object["mediaBlurRadius"] as? Int ?? value.mediaBlurRadius
+        value.accentColorName = object["accentColorName"] as? String ?? value.accentColorName
+        value.fontScale = object["fontScale"] as? Double ?? value.fontScale
         return value
     }
 
@@ -128,6 +131,9 @@ enum NativeSettingsPersistence {
             "showEncryptionIndicators": value.showEncryptionIndicators,
             "deliveryReceiptsContacts": value.deliveryReceiptsContacts,
             "deliveryReceiptsGroups": value.deliveryReceiptsGroups,
+            "mediaBlurRadius": value.mediaBlurRadius,
+            "accentColorName": value.accentColorName,
+            "fontScale": value.fontScale,
         ]
         if let days = value.messageRetentionDays { object["messageRetentionDays"] = days }
         if let data = try? JSONSerialization.data(withJSONObject: object) {

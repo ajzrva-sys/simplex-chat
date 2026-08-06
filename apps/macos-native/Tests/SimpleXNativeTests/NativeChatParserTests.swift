@@ -106,7 +106,8 @@ import Testing
         preview: "New message",
         timestamp: nil,
         unreadCount: 3,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
     let readProbe = MarkReadProbe()
     let model = AppModel(
@@ -150,7 +151,8 @@ import Testing
         preview: "Keep this unread",
         timestamp: nil,
         unreadCount: 1,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
     let readProbe = MarkReadProbe()
     let model = AppModel(
@@ -638,7 +640,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
     let group = NativeChat(
         id: "#9",
@@ -649,7 +652,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: true
+        sendAsGroup: true,
+            chatTagIds: []
     )
 
     // When
@@ -657,8 +661,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
     let groupCommand = try SimpleXCore.sendCommand(message: message, to: group)
 
     // Then
-    #expect(directCommand.hasPrefix("/_send @7 live=off ttl=default sign=off json "))
-    #expect(groupCommand.hasPrefix("/_send #9(as_group=on) live=off ttl=default sign=off json "))
+    #expect(directCommand.hasPrefix("/_send @7 live=off ttl=default json "))
+    #expect(groupCommand.hasPrefix("/_send #9(as_group=on) live=off ttl=default json "))
     for command in [directCommand, groupCommand] {
         let json = try #require(command.components(separatedBy: " json ").last)
         let encoded = try #require(json.data(using: .utf8))
@@ -678,7 +682,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
     let ordinaryGroup = NativeChat(
         id: "#8",
@@ -689,7 +694,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
     let channel = NativeChat(
         id: "#9",
@@ -700,7 +706,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: true
+        sendAsGroup: true,
+            chatTagIds: []
     )
 
     // When / Then: outgoing direct and ordinary group messages belong to the user.
@@ -731,7 +738,8 @@ private func whitespaceOnlyQuotedAttachmentsUseMeaningfulPreviews(testCase: Quot
         preview: "",
         timestamp: nil,
         unreadCount: 0,
-        sendAsGroup: false
+        sendAsGroup: false,
+            chatTagIds: []
     )
 
     // When / Then
@@ -4390,7 +4398,8 @@ private actor FileTransferRepositorySpy: FileTransferRepository {
             preview: "",
             timestamp: nil,
             unreadCount: 0,
-            sendAsGroup: false
+            sendAsGroup: false,
+            chatTagIds: []
         )
         let firstMessage = SimpleXCore.composedMessage(
             messageContent: ["type": "text", "text": "Original bundled-core message"],

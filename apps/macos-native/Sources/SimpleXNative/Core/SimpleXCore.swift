@@ -135,17 +135,30 @@ actor SimpleXCore {
         "/fc \(fileID)"
     }
 
-    func sendText(_ text: String, quotedItemID: Int64?, to chat: NativeChat) throws -> NativeSendReceipt {
+    func sendText(_ text: String, linkPreview: NativeLinkPreview? = nil, quotedItemID: Int64?, to chat: NativeChat) throws -> NativeSendReceipt {
         guard chat.kind.canSend else {
             throw NativeChatError.unavailable("This conversation cannot accept messages yet.")
         }
         return try sendComposedMessage(
             Self.composedMessage(
-                messageContent: ["type": "text", "text": text],
+                messageContent: Self.textMessageContent(text: text, linkPreview: linkPreview),
                 quotedItemID: quotedItemID
             ),
             to: chat
         )
+    }
+
+    nonisolated static func textMessageContent(text: String, linkPreview: NativeLinkPreview?) -> [String: Any] {
+        var content: [String: Any] = ["type": "text", "text": text]
+        if let linkPreview {
+            var preview: [String: Any] = [
+                "uri": linkPreview.uri,
+                "title": linkPreview.title,
+            ]
+            if let image = linkPreview.image { preview["image"] = image }
+            content["preview"] = preview
+        }
+        return content
     }
 
     func sendAttachment(

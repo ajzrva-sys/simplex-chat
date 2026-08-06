@@ -6,6 +6,8 @@ struct SimpleXNativeApp: App {
     private let instanceGuard: SingleInstanceGuard
     @StateObject private var model: AppModel
     @StateObject private var notifications: NativeNotificationManager
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    private let updaterManager = AppUpdaterManager()
 
     init() {
         guard let instanceGuard = SingleInstanceGuard() else {
@@ -85,6 +87,12 @@ struct SimpleXNativeApp: App {
                     }
                 }
             }
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updaterManager.checkForUpdates()
+                }
+                .disabled(!updaterManager.canCheckForUpdates)
+            }
         }
 
         Window("About \(AppIdentity.displayName)", id: AboutCommands.windowID) {
@@ -107,5 +115,14 @@ struct SimpleXNativeApp: App {
     private func sendFirstResponderAction(_ name: String) {
         NSApp.sendAction(Selector(name), to: nil, from: nil)
     }
+}
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidResignActive(_ notification: Notification) {
+        NotificationCenter.default.post(name: .appDidResignActive, object: nil)
+    }
+}
+
+extension Notification.Name {
+    static let appDidResignActive = Notification.Name("appDidResignActive")
 }

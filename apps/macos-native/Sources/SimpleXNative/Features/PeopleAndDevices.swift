@@ -195,10 +195,10 @@ enum PeopleAndDevicesParser {
         return ["filePath": file.filePath, "cryptoArgs": cryptoArgs]
     }
 
-    private static func string(_ value: Any?) -> String? { value as? String }
-    private static func bool(_ value: Any?) -> Bool? { value as? Bool }
-    private static func int(_ value: Any?) -> Int? { (value as? NSNumber)?.intValue }
-    private static func int64(_ value: Any?) -> Int64? { (value as? NSNumber)?.int64Value }
+    static func string(_ value: Any?) -> String? { value as? String }
+    static func bool(_ value: Any?) -> Bool? { value as? Bool }
+    static func int(_ value: Any?) -> Int? { (value as? NSNumber)?.intValue }
+    static func int64(_ value: Any?) -> Int64? { (value as? NSNumber)?.int64Value }
 }
 
 extension SimpleXCore {
@@ -222,6 +222,19 @@ extension SimpleXCore {
             throw NativeChatError.invalidResponse("The new profile could not be encoded.")
         }
         return try NativeChatParser.profile(from: sendCommand("/_create user \(json)"))
+    }
+
+    func updateProfile(userID: Int64, displayName: String, fullName: String, image: String?) throws -> NativeProfile {
+        let profile: [String: Any] = [
+            "displayName": displayName,
+            "fullName": fullName,
+            "image": image as Any,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: profile)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw NativeChatError.invalidResponse("The profile could not be encoded.")
+        }
+        return try NativeChatParser.profile(from: sendCommand("/_profile \(userID) \(json)"))
     }
 
     func listLinkedDevices() throws -> [LinkedDevice] {
@@ -280,6 +293,52 @@ extension SimpleXCore {
         ))
     }
 
+    func hideUser(userID: Int64, viewPwd: String) throws -> NativeProfile {
+        let json = try Self.jsonString(["viewPwd": viewPwd])
+        let data = try sendCommand("/_hide user \(userID) \(json)")
+        try NativeChatParser.validateCommandResponse(data, expectedType: "userPrivacy")
+        return try NativeChatParser.profile(from: data)
+    }
+
+    func unhideUser(userID: Int64, viewPwd: String) throws -> NativeProfile {
+        let json = try Self.jsonString(["viewPwd": viewPwd])
+        let data = try sendCommand("/_unhide user \(userID) \(json)")
+        try NativeChatParser.validateCommandResponse(data, expectedType: "userPrivacy")
+        return try NativeChatParser.profile(from: data)
+    }
+
+    func switchToHiddenProfile(userID: Int64, viewPwd: String) throws -> NativeProfile {
+        let json = try Self.jsonString(["viewPwd": viewPwd])
+        let data = try sendCommand("/_user \(userID) \(json)")
+        return try NativeChatParser.profile(from: data)
+    }
+
+    func getContactInfo(contactID: Int64) throws -> (connectionCode: String?, verified: Bool) {
+        let data = try sendCommand("/_info @\(contactID)")
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any] else {
+            return (nil, false)
+        }
+        let connection = result["connection"] as? [String: Any]
+        let code = PeopleAndDevicesParser.string(connection?["connectionCode"])
+        let verified = PeopleAndDevicesParser.bool(connection?["connectionVerified"]) ?? false
+        return (code, verified)
+    }
+
+    func getContactInfoRaw(contactID: Int64) throws -> Data {
+        try sendCommand("/_info @\(contactID)")
+    }
+
+    func verifyContact(contactID: Int64, code: String?) throws -> Bool {
+        let codeArg = code.map { " \($0)" } ?? ""
+        let data = try sendCommand("/_verify code @\(contactID)\(codeArg)")
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any] else {
+            return false
+        }
+        return PeopleAndDevicesParser.bool(result["connectionVerified"]) ?? false
+    }
+
     func connectContact(userID: Int64, link: String, incognito: Bool) throws {
         let mode = incognito ? "on" : "off"
         try NativeChatParser.validateCommandResponse(sendCommand("/_connect \(userID) incognito=\(mode) \(link)"))
@@ -300,5 +359,89 @@ extension SimpleXCore {
 
     func rejectContactRequest(_ id: Int64) throws {
         try NativeChatParser.validateCommandResponse(sendCommand("/_reject \(id)"))
+    }
+
+    func setUserDomain(userID: Int64, domain: String) throws {
+        let json = try Self.jsonString(["simplexDomain": domain])
+        try NativeChatParser.validateCommandResponse(sendCommand("/_set domain \(userID) \(json)"))
+    }
+
+    func getServersSummary(userID: Int64) throws -> ServersSummary {
+        let data = try sendCommand("/_servers summary \(userID)")
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any] else {
+            throw NativeChatError.invalidResponse("Could not parse servers summary.")
+        }
+        let smp = parseServerGroup(result["smpServers"])
+        let xftp = parseServerGroup(result["xftpServers"])
+        return ServersSummary(smpServers: smp, xftpServers: xftp)
+    }
+
+    private func parseServerGroup(_ value: Any?) -> [ServerSummary] {
+        guard let group = value as? [String: Any],
+              let servers = group["servers"] as? [[String: Any]] else { return [] }
+        return servers.compactMap { obj in
+            guard let server = PeopleAndDevicesParser.string(obj["server"]) else { return nil }
+            let sessions = obj["sessions"] as? [String: Any]
+            let subs = obj["subs"] as? [String: Any]
+            let stats = obj["stats"] as? [String: Any]
+            return ServerSummary(
+                server: server,
+                connected: PeopleAndDevicesParser.int(sessions?["ssConnected"]) ?? 0,
+                errors: PeopleAndDevicesParser.int(sessions?["ssErrors"]) ?? 0,
+                connecting: PeopleAndDevicesParser.int(sessions?["ssConnecting"]) ?? 0,
+                activeSubs: PeopleAndDevicesParser.int(subs?["active"]) ?? 0,
+                deletedSubs: PeopleAndDevicesParser.int(subs?["deleted"]) ?? 0,
+                sentDirect: PeopleAndDevicesParser.int(stats?["sentDirect"]) ?? 0,
+                sentViaProxy: PeopleAndDevicesParser.int(stats?["sentViaProxy"]) ?? 0,
+                sentProxied: PeopleAndDevicesParser.int(stats?["sentProxied"]) ?? 0,
+                recvDirect: PeopleAndDevicesParser.int(stats?["recvDirect"]) ?? 0,
+                recvViaProxy: PeopleAndDevicesParser.int(stats?["recvViaProxy"]) ?? 0,
+                recvProxied: PeopleAndDevicesParser.int(stats?["recvProxied"]) ?? 0
+            )
+        }
+    }
+
+    func reportMessage(groupID: Int64, itemID: Int64, reason: ReportReason) throws {
+        let json = try Self.jsonString(["reason": reason.rawValue])
+        try NativeChatParser.validateCommandResponse(sendCommand("/_report #\(groupID) \(itemID) \(json)"))
+    }
+
+    func deleteReceivedReports(groupID: Int64) throws {
+        try NativeChatParser.validateCommandResponse(sendCommand("/_delete reports #\(groupID)"))
+    }
+
+    func getChatItemInfo(chatRef: String, itemID: Int64) throws -> ChatItemInfo {
+        let data = try sendCommand("/_get item info \(chatRef) \(itemID)")
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let info = result["chatItemInfo"] as? [String: Any] else {
+            throw NativeChatError.invalidResponse("Could not parse message info.")
+        }
+        let versions = (info["itemVersions"] as? [[String: Any]] ?? []).compactMap { obj -> ChatItemVersion? in
+            guard let id = PeopleAndDevicesParser.int64(obj["chatItemVersionId"]),
+                  let ts = PeopleAndDevicesParser.string(obj["itemVersionTs"]),
+                  let created = PeopleAndDevicesParser.string(obj["createdAt"]) else { return nil }
+            return ChatItemVersion(
+                id: id,
+                msgContent: obj["msgContent"] as? [String: Any] ?? [:],
+                itemVersionTs: ts,
+                createdAt: created
+            )
+        }
+        let statuses = (info["memberDeliveryStatuses"] as? [[String: Any]])?.compactMap { obj -> MemberDeliveryStatus? in
+            guard let memberId = PeopleAndDevicesParser.int64(obj["groupMemberId"]) else { return nil }
+            let statusStr = PeopleAndDevicesParser.string(obj["memberDeliveryStatus"])
+            return MemberDeliveryStatus(
+                groupMemberId: memberId,
+                memberDisplayName: PeopleAndDevicesParser.string(obj["memberDisplayName"]) ?? "Member \(memberId)",
+                status: GroupSndStatus.from(statusStr),
+                sentViaProxy: PeopleAndDevicesParser.bool(obj["sentViaProxy"])
+            )
+        }
+        return ChatItemInfo(
+            itemVersions: versions,
+            memberDeliveryStatuses: statuses
+        )
     }
 }

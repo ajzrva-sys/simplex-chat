@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 typealias DeleteMessagesOperation = @Sendable ([Int64], NativeChat) async throws -> [NativeMessage]
-typealias SendTextOperation = @Sendable (String, Int64?, NativeChat) async throws -> NativeSendReceipt
+typealias SendTextOperation = @Sendable (String, Int64?, NativeLinkPreview?, NativeChat) async throws -> NativeSendReceipt
 typealias SendAttachmentOperation = @Sendable (PendingAttachment, String, Int64?, NativeChat) async throws -> NativeSendReceipt
 typealias LoadMessageOperation = @Sendable (NativeChat.ID, Int64) async throws -> NativeMessage?
 typealias LoadMessagesOperation = @Sendable (NativeChat.ID, Int64?) async throws -> [NativeMessage]
@@ -54,8 +54,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var managedProfiles: [ManagedProfile] = []
     @Published private(set) var linkedDevices: [LinkedDevice] = []
     @Published private(set) var remotePairing: RemotePairing?
+    @Published var userTags: [ChatTag] = []
+    @Published var activeTagFilter: Int64? = nil
+    @Published var chatTagIds: [NativeChat.ID: [Int64]] = [:]
+    @Published var tagAssignmentChat: NativeChat?
+    @Published var showUserAddress = false
     @Published var featureError: String?
     @Published private(set) var isLoadingFeatures = false
+    @Published var botCommands: [ChatBotCommand] = []
+    @Published var serversSummary: ServersSummary?
+    @Published var onboardingStage: OnboardingStage?
+
+    enum OnboardingStage: String, Sendable {
+        case simpleXInfo
+        case createProfile
+        case complete
+    }
+    @Published var showServersSummary = false
+    @Published var messageInfoChat: NativeChat?
+    @Published var messageInfoMessage: NativeMessage?
+    @Published var messageInfoData: ChatItemInfo?
     @Published var conversationSearchText = ""
     @Published var conversationSearchPresented = false
     @Published var isLoadingConversation = false
@@ -68,6 +86,10 @@ final class AppModel: ObservableObject {
     @Published var selectedMessageIDs: Set<Int64> = []
     @Published var transcriptFocused = false
     @Published var pendingAttachments: [PendingAttachment] = []
+    @Published var pendingLinkPreview: NativeLinkPreview?
+    @Published var isLoadingLinkPreview = false
+    private(set) var cancelledLinkURLs: Set<String> = []
+    private var linkPreviewTask: Task<Void, Never>?
     @Published var attachmentError: String?
     @Published var attachmentOpenError: String?
     @Published var quickLookURL: URL?
@@ -95,6 +117,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var keychainPassphraseStorageAvailable: Bool
     @Published var density: DesktopChatDensity {
         didSet { UserDefaults.standard.set(density.rawValue, forKey: Self.densityKey) }
+    }
+
+    // MARK: - App Passcode Lock
+    @Published var isAppLocked: Bool = false
+    @Published var appPasscodeEnabled: Bool = false
+    @Published var selfDestructPasscodeEnabled: Bool = false
+
+    private let appPasscodeStore: any AppPasscodeStore
+
+    enum PasscodeResult: Sendable {
+        case success
+        case wrongPasscode
+        case selfDestruct
+        case error(String)
     }
 
     private let core: SimpleXCore
@@ -180,6 +216,7 @@ final class AppModel: ObservableObject {
     init(
         notificationManager: NativeNotificationManager? = nil,
         passphraseStore: any DatabasePassphraseStore = MigratingDatabasePassphraseStore(),
+        appPasscodeStore: any AppPasscodeStore = AppPasscodeKeychain(),
         previewMode: Bool? = nil,
         deleteMessagesOperation: DeleteMessagesOperation? = nil,
         sendTextOperation: SendTextOperation? = nil,
@@ -202,6 +239,7 @@ final class AppModel: ObservableObject {
         self.previewMode = previewMode
             ?? (ProcessInfo.processInfo.environment["SIMPLEX_NATIVE_UI_PREVIEW"] == "1")
         self.passphraseStore = passphraseStore
+        self.appPasscodeStore = appPasscodeStore
         self.deleteMessagesOperation = deleteMessagesOperation
         self.sendTextOperation = sendTextOperation
         self.sendAttachmentOperation = sendAttachmentOperation
@@ -228,7 +266,23 @@ final class AppModel: ObservableObject {
             selectedChatID = NativePreviewData.chats.first?.id
             messages = selectedChatID.map(NativePreviewData.messages) ?? []
         } else if keychainPassphraseStorageAvailable {
-            Task { await attemptAutomaticUnlock() }
+            Task {
+                await loadAppPasscodeState()
+                if !UserDefaults.standard.bool(forKey: "nativeChat.onboardingComplete") {
+                    // First-time user - try to open, if fails show onboarding
+                    do {
+                        try await openProfile(passphrase: "default", rememberPassphrase: true, automatic: true)
+                        if profile != nil {
+                            UserDefaults.standard.set(true, forKey: "nativeChat.onboardingComplete")
+                        }
+                    } catch {
+                        onboardingStage = .simpleXInfo
+                        phase = .ready
+                    }
+                } else {
+                    await attemptAutomaticUnlock()
+                }
+            }
         }
     }
 
@@ -252,12 +306,68 @@ final class AppModel: ObservableObject {
         chats.first { $0.id == selectedChatID }
     }
 
-    var filteredChats: [NativeChat] {
-        guard !searchText.isEmpty else { return chats }
-        return chats.filter {
-            $0.displayName.localizedCaseInsensitiveContains(searchText)
-                || $0.preview.localizedCaseInsensitiveContains(searchText)
+    var showBotCommands: Bool {
+        draft.hasPrefix("/") && !botCommands.isEmpty && editingMessage == nil
+    }
+
+    var botCommandFilter: String {
+        guard draft.hasPrefix("/") else { return "" }
+        return draft
+    }
+
+    func loadBotCommands() async {
+        guard let chat = selectedChat else { return }
+        do {
+            let data = try await core.getContactInfoRaw(contactID: chat.apiID)
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = root["result"] as? [String: Any] else { return }
+            let contact = result["contact"] as? [String: Any]
+            let group = result["group"] as? [String: Any]
+            let commands: [ChatBotCommand]
+            if let merged = contact?["mergedPreferences"] as? [String: Any] {
+                commands = ChatBotCommand.parseCommands(from: merged["commands"])
+            } else if let groupInfo = group?["groupInfo"] as? [String: Any],
+                      let prefs = groupInfo["preferences"] as? [String: Any] {
+                commands = ChatBotCommand.parseCommands(from: prefs["commands"])
+            } else {
+                commands = []
+            }
+            botCommands = commands
+        } catch {
+            botCommands = []
         }
+    }
+
+    func selectBotCommand(_ command: ChatBotCommand) {
+        switch command {
+        case .command(let keyword, _, let params):
+            if params != nil {
+                draft = "/\(keyword) "
+            } else {
+                draft = "/\(keyword)"
+                sendDraft()
+            }
+        case .menu(_, let children):
+            // Navigate into submenu - update commands to show children
+            botCommands = children
+        }
+    }
+
+    var filteredChats: [NativeChat] {
+        var result = chats
+        if let tagFilter = activeTagFilter {
+            result = result.filter { chat in
+                let ids = chatTagIds[chat.id] ?? chat.chatTagIds
+                return ids.contains(tagFilter)
+            }
+        }
+        if !searchText.isEmpty {
+            result = result.filter {
+                $0.displayName.localizedCaseInsensitiveContains(searchText)
+                    || $0.preview.localizedCaseInsensitiveContains(searchText)
+            }
+        }
+        return result
     }
 
     var canSendDraft: Bool {
@@ -319,6 +429,7 @@ final class AppModel: ObservableObject {
             || sidebarSearchPresented
             || (replyingTo != nil && !isSendingSelectedChat)
             || (!pendingAttachments.isEmpty && !isSendingSelectedChat)
+            || (pendingLinkPreview != nil && !isSendingSelectedChat)
             || !selectedMessageIDs.isEmpty
     }
 
@@ -414,10 +525,230 @@ final class AppModel: ObservableObject {
                 async let devices = core.listLinkedDevices()
                 managedProfiles = try await profiles
                 linkedDevices = try await devices
+                if let userID = profile?.userID {
+                    userTags = try await core.getChatTags(userID: userID)
+                }
             } catch {
                 featureError = error.localizedDescription
             }
         }
+    }
+
+    // MARK: - Chat Tags
+
+    func loadChatTags() async throws -> [ChatTag] {
+        guard let userID = profile?.userID else { return [] }
+        let tags = try await core.getChatTags(userID: userID)
+        userTags = tags
+        return tags
+    }
+
+    func createChatTag(emoji: String?, text: String) async throws -> [ChatTag] {
+        guard let userID = profile?.userID else { return userTags }
+        let tags = try await core.createChatTag(userID: userID, tag: ChatTagData(emoji: emoji, text: text))
+        userTags = tags
+        return tags
+    }
+
+    func updateChatTag(tagId: Int64, emoji: String?, text: String) async throws {
+        try await core.updateChatTag(tagId: tagId, tag: ChatTagData(emoji: emoji, text: text))
+    }
+
+    func deleteChatTag(tagId: Int64) async throws {
+        try await core.deleteChatTag(tagId: tagId)
+    }
+
+    func setChatTagsForChat(chatID: String, tagIds: [Int64]?) async throws -> SetChatTagsResult {
+        let result = try await core.setChatTags(chatID: chatID, tagIds: tagIds)
+        userTags = result.userTags
+        chatTagIds[chatID] = result.chatTagIds
+        return result
+    }
+
+    func reorderChatTags(tagIds: [Int64]) async throws {
+        try await core.reorderChatTags(tagIds: tagIds)
+        let _ = try await loadChatTags()
+    }
+
+    // MARK: - User Address
+
+    func loadUserAddress() async throws -> UserAddress? {
+        try await core.getUserAddress()
+    }
+
+    func createUserAddress() async throws -> UserAddress {
+        try await core.createUserAddress()
+    }
+
+    func deleteUserAddress() async throws {
+        try await core.deleteUserAddress()
+    }
+
+    func saveAddressSettings(autoAccept: Bool?, incognito: Bool?, autoReplyText: String?) async throws -> UserAddress? {
+        try await core.setAddressSettings(autoAccept: autoAccept, incognito: incognito, autoReplyText: autoReplyText)
+    }
+
+    // MARK: - Hidden Profiles
+
+    func hideProfile(_ profile: ManagedProfile, password: String) async throws {
+        _ = try await core.hideUser(userID: profile.id, viewPwd: password)
+        reloadPeopleAndDevices()
+    }
+
+    func unhideProfile(_ profile: ManagedProfile, password: String) async throws {
+        _ = try await core.unhideUser(userID: profile.id, viewPwd: password)
+        reloadPeopleAndDevices()
+    }
+
+    func revealHiddenProfile(userID: Int64, password: String) async throws {
+        _ = try await core.switchToHiddenProfile(userID: userID, viewPwd: password)
+        reloadPeopleAndDevices()
+    }
+
+    // MARK: - Group Management
+
+    func createGroup(displayName: String, fullName: String, description: String, isPublic: Bool, incognito: Bool) async throws {
+        guard let userID = profile?.userID else { return }
+        let groupChat = try await core.createGroup(
+            userID: userID,
+            profile: GroupProfile(
+                displayName: displayName,
+                fullName: fullName,
+                description: description,
+                image: nil,
+                isPublic: isPublic
+            ),
+            incognito: incognito
+        )
+        chats = try await core.loadChats(userID: userID)
+        _ = transitionToChat(groupChat.id)
+    }
+
+    func updateGroupProfile(groupID: Int64, displayName: String, fullName: String, description: String, isPublic: Bool) async throws {
+        try await core.updateGroupProfile(
+            groupID: groupID,
+            profile: GroupProfile(
+                displayName: displayName,
+                fullName: fullName,
+                description: description,
+                image: nil,
+                isPublic: isPublic
+            )
+        )
+        guard let userID = profile?.userID else { return }
+        chats = try await core.loadChats(userID: userID)
+    }
+
+    func getGroupProfile(groupID: Int64) async throws -> GroupProfile? {
+        let members = try await core.getGroupMembers(groupID: groupID)
+        guard let creator = members.first(where: { $0.memberStatus == .creator }) else { return nil }
+        return GroupProfile(
+            displayName: selectedChat?.displayName ?? "",
+            fullName: "",
+            description: "",
+            image: selectedChat?.image,
+            isPublic: false
+        )
+    }
+
+    func getGroupMembers(groupID: Int64) async throws -> [GroupMember] {
+        try await core.getGroupMembers(groupID: groupID)
+    }
+
+    func addGroupMember(groupID: Int64, contactID: Int64, role: GroupMemberRole) async throws {
+        try await core.addGroupMember(groupID: groupID, contactID: contactID, role: role)
+    }
+
+    func removeGroupMembers(groupID: Int64, memberIDs: [Int64], messages: Bool) async throws {
+        try await core.removeGroupMembers(groupID: groupID, memberIDs: memberIDs, messages: messages)
+    }
+
+    func changeMemberRole(groupID: Int64, memberIDs: [Int64], role: GroupMemberRole) async throws {
+        try await core.changeMemberRole(groupID: groupID, memberIDs: memberIDs, role: role)
+    }
+
+    func blockGroupMembers(groupID: Int64, memberIDs: [Int64], blocked: Bool) async throws {
+        try await core.blockGroupMembers(groupID: groupID, memberIDs: memberIDs, blocked: blocked)
+    }
+
+    func createGroupLink(groupID: Int64, role: GroupMemberRole) async throws -> GroupLink {
+        try await core.createGroupLink(groupID: groupID, role: role)
+    }
+
+    func getGroupLink(groupID: Int64) async throws -> GroupLink? {
+        try await core.getGroupLink(groupID: groupID)
+    }
+
+    func deleteGroupLink(groupID: Int64) async throws {
+        try await core.deleteGroupLink(groupID: groupID)
+    }
+
+    func getContactConnectionInfo(contactID: Int64) async throws -> (connectionCode: String?, verified: Bool) {
+        try await core.getContactInfo(contactID: contactID)
+    }
+
+    func verifyContactCode(contactID: Int64, code: String?) async throws -> Bool {
+        try await core.verifyContact(contactID: contactID, code: code)
+    }
+
+    func setSimplexName(domain: String) async throws {
+        guard let userID = profile?.userID else { return }
+        try await core.setUserDomain(userID: userID, domain: domain)
+    }
+
+    func setContactPreferences(contactID: Int64, preferences: String) async throws {
+        _ = try await core.apiSetContactPrefs(contactID: contactID, preferences: preferences)
+    }
+
+    func loadServersSummary() async throws -> ServersSummary {
+        guard let userID = profile?.userID else {
+            throw NativeChatError.unavailable("No active profile.")
+        }
+        return try await core.getServersSummary(userID: userID)
+    }
+
+    func reportMessage(groupID: Int64, itemID: Int64, reason: ReportReason) async throws {
+        try await core.reportMessage(groupID: groupID, itemID: itemID, reason: reason)
+    }
+
+    func deleteReceivedReports(groupID: Int64) async throws {
+        try await core.deleteReceivedReports(groupID: groupID)
+    }
+
+    func loadMessageInfo(chatRef: String, itemID: Int64) async throws -> ChatItemInfo {
+        try await core.getChatItemInfo(chatRef: chatRef, itemID: itemID)
+    }
+
+    func presentMessageInfo(_ message: NativeMessage, chat: NativeChat) {
+        messageInfoChat = chat
+        messageInfoMessage = message
+        messageInfoData = nil
+        Task {
+            do {
+                let chatRef = "\(chat.kind.rawValue)\(chat.apiID)"
+                let info = try await loadMessageInfo(chatRef: chatRef, itemID: message.id)
+                messageInfoData = info
+            } catch {
+                messageInfoData = ChatItemInfo(itemVersions: [], memberDeliveryStatuses: nil)
+            }
+        }
+    }
+
+    func loadContactMergedPreferences(contactID: Int64) async throws -> ContactUserPreferences {
+        let data = try await core.getContactInfoRaw(contactID: contactID)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let contact = result["contact"] as? [String: Any],
+              let merged = contact["mergedPreferences"] as? [String: Any] else {
+            throw NativeChatError.invalidResponse("Could not load contact preferences.")
+        }
+        return try ContactPreferencesParser.parseMergedPreferences(merged)
+    }
+
+    func updateUserProfile(displayName: String, fullName: String, image: String?) async throws {
+        guard let userID = profile?.userID else { return }
+        let updated = try await core.updateProfile(userID: userID, displayName: displayName, fullName: fullName, image: image)
+        profile = updated
     }
 
     func activateProfile(_ managedProfile: ManagedProfile) {
@@ -593,6 +924,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func saveSettings() {
+        NativeSettingsPersistence.save(settingsSnapshot)
+    }
+
+    func createFirstProfile(displayName: String, fullName: String) async throws -> NativeProfile {
+        let profile = try await core.createProfile(displayName: displayName, fullName: fullName)
+        let loadedChats = try await core.loadChats(userID: profile.userID)
+        self.profile = profile
+        self.chats = loadedChats
+        phase = .ready
+        selectedChatID = loadedChats.first?.id
+        startEventLoop()
+        onboardingStage = nil
+        UserDefaults.standard.set(true, forKey: "nativeChat.onboardingComplete")
+        return profile
+    }
+
     func savePrivacySettings() {
         guard let userID = profile?.userID else { return }
         let snapshot = settingsSnapshot
@@ -751,6 +1099,58 @@ final class AppModel: ObservableObject {
         return scheduleConversationLoad(chatID: chatID, scrollToLatest: true)
     }
 
+    // MARK: - Link Preview Compose
+
+    func checkForLinkPreview(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = NativeMessageLink.standaloneURL(in: trimmed),
+              !cancelledLinkURLs.contains(url.absoluteString),
+              pendingAttachments.isEmpty else {
+            if pendingLinkPreview != nil || isLoadingLinkPreview {
+                cancelLinkPreview()
+            }
+            return
+        }
+
+        let urlString = url.absoluteString
+        if let existing = pendingLinkPreview, existing.uri == urlString { return }
+
+        linkPreviewTask?.cancel()
+        isLoadingLinkPreview = true
+        pendingLinkPreview = nil
+
+        let fetcher = LinkPreviewFetcher.shared
+        linkPreviewTask = Task { [weak self] in
+            let preview = await fetcher.fetch(for: urlString)
+            guard let self, !Task.isCancelled else { return }
+            if let preview {
+                self.pendingLinkPreview = preview
+            }
+            self.isLoadingLinkPreview = false
+            self.linkPreviewTask = nil
+        }
+    }
+
+    func cancelLinkPreview() {
+        linkPreviewTask?.cancel()
+        linkPreviewTask = nil
+        if let preview = pendingLinkPreview {
+            cancelledLinkURLs.insert(preview.uri)
+        }
+        pendingLinkPreview = nil
+        isLoadingLinkPreview = false
+        Task { await LinkPreviewFetcher.shared.cancel() }
+    }
+
+    private func clearLinkPreviewState() {
+        linkPreviewTask?.cancel()
+        linkPreviewTask = nil
+        pendingLinkPreview = nil
+        isLoadingLinkPreview = false
+        cancelledLinkURLs.removeAll()
+        Task { await LinkPreviewFetcher.shared.cancel() }
+    }
+
     func sendDraft() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if let editingMessage {
@@ -762,6 +1162,8 @@ final class AppModel: ObservableObject {
               canSendDraft else { return }
         let quotedMessage = replyingChatID == chat.id ? replyingTo : nil
         if replyingTo != nil, quotedMessage == nil { cancelReply() }
+        let linkPreview = pendingLinkPreview
+        clearLinkPreviewState()
         if previewMode, sendTextOperation == nil, sendAttachmentOperation == nil {
             if !text.isEmpty {
                 let nextID = (messages.map(\.id).max() ?? 0) + 1
@@ -772,7 +1174,7 @@ final class AppModel: ObservableObject {
                     sent: true,
                     author: nil,
                     deletable: true,
-                    content: .text,
+                    content: linkPreview.map { .link($0) } ?? .text,
                     quotedItem: quotedMessage.map {
                         NativeQuote(
                             messageID: $0.id,
@@ -829,9 +1231,9 @@ final class AppModel: ObservableObject {
                     try Task.checkCancellation()
                     let receipt: NativeSendReceipt
                     if let sendTextOperation {
-                        receipt = try await sendTextOperation(text, quotedMessage?.id, chat)
+                        receipt = try await sendTextOperation(text, quotedMessage?.id, linkPreview, chat)
                     } else {
-                        receipt = try await core.sendText(text, quotedItemID: quotedMessage?.id, to: chat)
+                        receipt = try await core.sendText(text, linkPreview: linkPreview, quotedItemID: quotedMessage?.id, to: chat)
                     }
                     draftWasSent = true
                     self?.applyCommittedMessages(
@@ -1861,6 +2263,8 @@ final class AppModel: ObservableObject {
             cancelEditing()
         } else if replyingTo != nil, !isSendingSelectedChat {
             cancelReply()
+        } else if pendingLinkPreview != nil, !isSendingSelectedChat {
+            cancelLinkPreview()
         } else if !pendingAttachments.isEmpty, !isSendingSelectedChat {
             pendingAttachments = []
         } else if !selectedMessageIDs.isEmpty {
@@ -1940,6 +2344,8 @@ final class AppModel: ObservableObject {
             quickLookRequestKey = nil
             quickLookURL = nil
             editingMessage = nil
+            clearLinkPreviewState()
+            botCommands = []
             cancelReplyTargetNavigation()
             quoteNavigationTask?.cancel()
             quoteNavigationTask = nil
@@ -2420,20 +2826,10 @@ final class AppModel: ObservableObject {
         do {
             chats = try await loadChats(userID: userID)
             if let chatID = selectedChatID, canRefreshConversation {
-                let anchor = conversationAnchorMessageID
-                let loaded = await loadConversation(
-                    chatID: chatID,
-                    around: anchor,
-                    showProgress: false,
-                    reportFailure: anchor == nil
-                )
-                if !loaded, anchor != nil, !Task.isCancelled,
-                   selectedChatID == chatID,
-                   conversationAnchorMessageID == anchor,
-                   !isLoadingConversation {
-                    conversationAnchorMessageID = nil
-                    _ = await loadConversation(chatID: chatID, showProgress: false)
-                }
+                // Always reload from the latest messages after an event,
+                // so new incoming messages are visible regardless of scroll position.
+                conversationAnchorMessageID = nil
+                _ = await loadConversation(chatID: chatID, showProgress: false)
             }
             consumePendingNotificationRoutes()
         } catch is CancellationError {
@@ -2503,6 +2899,11 @@ final class AppModel: ObservableObject {
             startEventLoop()
             notificationManager?.chatSetupReady()
             consumePendingNotificationRoutes()
+
+            // Show app lock screen if passcode is enabled
+            if appPasscodeEnabled {
+                isAppLocked = true
+            }
         } catch {
             if automatic, error.localizedDescription == "That database passphrase is not correct." {
                 do {
@@ -2516,5 +2917,175 @@ final class AppModel: ObservableObject {
                 phase = .locked(message: error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - App Passcode Lock
+
+    private func loadAppPasscodeState() async {
+        do {
+            let passcode = try await appPasscodeStore.loadPasscode()
+            appPasscodeEnabled = passcode != nil
+            let selfDestruct = try await appPasscodeStore.loadSelfDestructPasscode()
+            selfDestructPasscodeEnabled = selfDestruct != nil
+        } catch {
+            appPasscodeEnabled = false
+            selfDestructPasscodeEnabled = false
+        }
+    }
+
+    func lockApp() {
+        guard appPasscodeEnabled else { return }
+        isAppLocked = true
+    }
+
+    func unlockApp() {
+        isAppLocked = false
+    }
+
+    @MainActor
+    func verifyAppPasscode(_ passcode: String) async -> PasscodeResult {
+        do {
+            // Check self-destruct first
+            if let selfDestructPin = try await appPasscodeStore.loadSelfDestructPasscode(),
+               passcode == selfDestructPin {
+                await executeSelfDestruct()
+                return .selfDestruct
+            }
+
+            // Check normal passcode
+            guard let storedPasscode = try await appPasscodeStore.loadPasscode() else {
+                return .error("No app passcode is set.")
+            }
+
+            if passcode == storedPasscode {
+                isAppLocked = false
+                return .success
+            } else {
+                return .wrongPasscode
+            }
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    func setAppPasscode(_ passcode: String) async -> PasscodeResult {
+        do {
+            try await appPasscodeStore.savePasscode(passcode)
+            appPasscodeEnabled = true
+            return .success
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    func changeAppPasscode(current: String, new: String) async -> PasscodeResult {
+        do {
+            guard let storedPasscode = try await appPasscodeStore.loadPasscode() else {
+                return .error("No app passcode is set.")
+            }
+            guard current == storedPasscode else {
+                return .error("The current passcode is incorrect.")
+            }
+            try await appPasscodeStore.savePasscode(new)
+            return .success
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    func removeAppPasscode() async -> PasscodeResult {
+        do {
+            try await appPasscodeStore.deletePasscode()
+            appPasscodeEnabled = false
+            isAppLocked = false
+            return .success
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    func setSelfDestructPasscode(_ passcode: String) async -> PasscodeResult {
+        do {
+            // Self-destruct passcode must differ from app passcode
+            if let appPasscode = try await appPasscodeStore.loadPasscode(),
+               passcode == appPasscode {
+                return .error("Self-destruct passcode must be different from the app passcode.")
+            }
+            try await appPasscodeStore.saveSelfDestructPasscode(passcode)
+            selfDestructPasscodeEnabled = true
+            return .success
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    func removeSelfDestructPasscode() async -> PasscodeResult {
+        do {
+            try await appPasscodeStore.deleteSelfDestructPasscode()
+            selfDestructPasscodeEnabled = false
+            return .success
+        } catch {
+            return .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func executeSelfDestruct() async {
+        // 1. Stop chat core
+        do {
+            try await core.stopMainChatForMigration()
+        } catch {
+            // Continue even if stop fails
+        }
+
+        // 2. Cancel event loop
+        eventTask?.cancel()
+        eventTask = nil
+
+        // 3. Delete database files at ~/.local/share/simplex/
+        let dataDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/simplex", isDirectory: true)
+        if FileManager.default.fileExists(atPath: dataDirectory.path) {
+            try? FileManager.default.removeItem(at: dataDirectory)
+        }
+
+        // 4. Reset app state
+        profile = nil
+        chats = []
+        messages = []
+        selectedChatID = nil
+        currentRemoteHostID = nil
+        managedProfiles = []
+        linkedDevices = []
+        remotePairing = nil
+        userTags = []
+        chatTagIds = [:]
+        hasStoredPassphrase = false
+        resetMediaContext()
+
+        // 5. Set app passcode to self-destruct PIN and remove self-destruct from keychain
+        do {
+            if let selfDestructPin = try await appPasscodeStore.loadSelfDestructPasscode() {
+                try await appPasscodeStore.savePasscode(selfDestructPin)
+                try await appPasscodeStore.deleteSelfDestructPasscode()
+                appPasscodeEnabled = true
+                selfDestructPasscodeEnabled = false
+            }
+        } catch {
+            // If we fail, remove both
+            try? await appPasscodeStore.deletePasscode()
+            try? await appPasscodeStore.deleteSelfDestructPasscode()
+            appPasscodeEnabled = false
+            selfDestructPasscodeEnabled = false
+        }
+
+        // 6. Update phase and lock state
+        phase = .locked(message: "All data has been erased. The app is now set up with the self-destruct passcode.")
+        isAppLocked = false
     }
 }

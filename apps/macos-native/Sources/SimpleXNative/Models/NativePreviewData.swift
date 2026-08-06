@@ -14,7 +14,8 @@ enum NativePreviewData {
             preview: "The photos came through perfectly.",
             timestamp: Date().addingTimeInterval(-240),
             unreadCount: 2,
-            sendAsGroup: false
+            sendAsGroup: false,
+            chatTagIds: []
         ),
         NativeChat(
             id: "#2",
@@ -25,7 +26,8 @@ enum NativePreviewData {
             preview: "Jordan: Saturday works for me",
             timestamp: Date().addingTimeInterval(-3_600),
             unreadCount: 0,
-            sendAsGroup: false
+            sendAsGroup: false,
+            chatTagIds: []
         ),
         NativeChat(
             id: "*3",
@@ -36,7 +38,8 @@ enum NativePreviewData {
             preview: "Packing list",
             timestamp: Calendar.current.date(byAdding: .day, value: -1, to: Date()),
             unreadCount: 0,
-            sendAsGroup: false
+            sendAsGroup: false,
+            chatTagIds: []
         ),
     ]
 

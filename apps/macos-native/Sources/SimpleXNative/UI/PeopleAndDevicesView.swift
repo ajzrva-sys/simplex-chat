@@ -10,6 +10,10 @@ struct PeopleAndDevicesView: View {
     @State private var useIncognito = false
     @State private var newDisplayName = ""
     @State private var newFullName = ""
+    @State private var profileToHide: ManagedProfile?
+    @State private var showRevealProfile = false
+    @State private var showImagePicker = false
+    @State private var showCreateGroup = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,6 +56,12 @@ struct PeopleAndDevicesView: View {
         } message: {
             Text(model.featureError ?? "")
         }
+        .sheet(isPresented: $model.showUserAddress) {
+            UserAddressView(model: model)
+        }
+        .sheet(isPresented: $showCreateGroup) {
+            CreateGroupView(model: model)
+        }
         .task { model.reloadPeopleAndDevices() }
     }
 
@@ -65,6 +75,16 @@ struct PeopleAndDevicesView: View {
                     model.connectContact(link: contactLink, incognito: useIncognito)
                 }
                 .disabled(contactLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isLoadingFeatures)
+            }
+            Section("Groups") {
+                Button("Create Group…") {
+                    showCreateGroup = true
+                }
+            }
+            Section("Your Address") {
+                Button("Manage SimpleX Address…") {
+                    model.showUserAddress = true
+                }
             }
             Section("Contact Requests") {
                 let requests = model.chats.filter { $0.kind == .contactRequest }
@@ -95,7 +115,10 @@ struct PeopleAndDevicesView: View {
     private var profiles: some View {
         Form {
             Section("Profiles") {
-                ForEach(model.managedProfiles) { profile in
+                let visibleProfiles = model.managedProfiles.filter { !$0.hidden }
+                let hiddenProfiles = model.managedProfiles.filter { $0.hidden }
+
+                ForEach(visibleProfiles) { profile in
                     HStack {
                         ProfileAvatar(image: profile.image, name: profile.displayName, size: 32)
                             .accessibilityHidden(true)
@@ -108,11 +131,52 @@ struct PeopleAndDevicesView: View {
                             }
                         }
                         Spacer()
-                        if profile.hidden { Image(systemName: "eye.slash").help("Hidden profile") }
                         if profile.active {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
                         } else {
                             Button("Use") { model.activateProfile(profile) }
+                            Button("Hide…") { profileToHide = profile }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if !hiddenProfiles.isEmpty {
+                    HStack {
+                        Image(systemName: "eye.slash")
+                            .foregroundStyle(.secondary)
+                        Text("\(hiddenProfiles.count) hidden profile\(hiddenProfiles.count == 1 ? "" : "s")")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Reveal…") { showRevealProfile = true }
+                    }
+                }
+            }
+            Section("Edit Current Profile") {
+                HStack {
+                    ProfileAvatar(image: model.profile?.image, name: model.profile?.displayName ?? "Profile", size: 48)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading) {
+                        Text(model.profile?.displayName ?? "Profile")
+                            .font(.headline)
+                        Text("Tap to change profile image")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Choose Image…") {
+                        showImagePicker = true
+                    }
+                    if model.profile?.image != nil {
+                        Button("Remove", role: .destructive) {
+                            Task {
+                                try await model.updateUserProfile(
+                                    displayName: model.profile?.displayName ?? "",
+                                    fullName: "",
+                                    image: nil
+                                )
+                            }
                         }
                     }
                 }
@@ -129,6 +193,32 @@ struct PeopleAndDevicesView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(item: $profileToHide) { profile in
+            HideProfileView(profile: profile) { password in
+                Task { try await model.hideProfile(profile, password: password) }
+            }
+        }
+        .sheet(isPresented: $showRevealProfile) {
+            RevealProfileView { password in
+                if let hidden = model.managedProfiles.first(where: { $0.hidden }) {
+                    Task { try await model.revealHiddenProfile(userID: hidden.id, password: password) }
+                }
+            }
+        }
+        .sheet(isPresented: $showImagePicker) {
+            ImagePickerView { image in
+                let cropped = cropToSquare(image)
+                if let base64 = compressImageToBase64(cropped) {
+                    Task {
+                        try await model.updateUserProfile(
+                            displayName: model.profile?.displayName ?? "",
+                            fullName: "",
+                            image: base64
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private var devices: some View {
@@ -190,15 +280,35 @@ struct PeopleAndDevicesView: View {
                         .padding(.vertical, 8)
                     } else if !pairing.invitation.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text(pairing.remoteHostID == nil
-                                ? "On your phone, open SimpleX Settings → Use from desktop, then scan this code."
-                                : "On your phone, open SimpleX Settings → Use from desktop and choose this Mac. You can also scan this code.")
-                                .font(.headline)
-                            QRCodeView(value: pairing.invitation)
-                                .frame(width: 200, height: 200)
-                            Button("Copy Pairing Link") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(pairing.invitation, forType: .string)
+                            if pairing.remoteHostID != nil {
+                                // Reconnecting to existing device — multicast discovery
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Waiting for your phone to discover this Mac…")
+                                        .font(.headline)
+                                }
+                                Text("Open SimpleX on your phone → Settings → Use from desktop, then choose this Mac. Both devices must be on the same local network.")
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout)
+                                DisclosureGroup("Show QR code (fallback)") {
+                                    QRCodeView(value: pairing.invitation)
+                                        .frame(width: 180, height: 180)
+                                    Button("Copy Pairing Link") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(pairing.invitation, forType: .string)
+                                    }
+                                    .font(.caption)
+                                }
+                            } else {
+                                // New device — QR code required
+                                Text("On your phone, open SimpleX Settings → Use from desktop, then scan this code.")
+                                    .font(.headline)
+                                QRCodeView(value: pairing.invitation)
+                                    .frame(width: 200, height: 200)
+                                Button("Copy Pairing Link") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(pairing.invitation, forType: .string)
+                                }
                             }
                         }
                         .padding(.vertical, 8)

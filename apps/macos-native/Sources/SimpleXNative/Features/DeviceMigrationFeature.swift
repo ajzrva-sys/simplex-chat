@@ -216,7 +216,7 @@ final class DeviceMigrationCoordinator: ObservableObject {
         runOperation { [weak self] in
             guard let self else { return }
             phase = .preparingImport
-            let network = try await core.networkConfigurationJSON()
+            let network = try await core.networkConfigurationJSON(forceLocal: true)
             let archive = try await core.prepareMigrationArchiveURL()
             archiveURL = archive
             let userID = try await core.startMigrationController(networkConfigurationJSON: network)
@@ -285,13 +285,13 @@ final class DeviceMigrationCoordinator: ObservableObject {
         runOperation { [weak self] in
             guard let self else { return }
             phase = .preparingExport
-            let network = try await core.networkConfigurationJSON()
+            let network = try await core.networkConfigurationJSON(forceLocal: true)
             let archive = try await core.prepareMigrationArchiveURL()
             archiveURL = archive
             pauseEventsIfNeeded()
             try await core.stopMainChatForMigration()
             mainChatStopped = true
-            try await core.exportDatabase(to: archive.path)
+            try await core.exportDatabase(to: archive.path, forceLocal: true)
             let total = try Self.fileSize(archive)
             let userID = try await core.startMigrationController(networkConfigurationJSON: network)
             let response = try await core.sendMigrationCommand(
@@ -469,7 +469,7 @@ extension SimpleXCore {
     }
 
     func installMigrationArchive(at archiveURL: URL) throws {
-        try importDatabase(from: archiveURL.path)
+        try importDatabase(from: archiveURL.path, forceLocal: true)
         discardMainControllerAfterMigration()
     }
 }

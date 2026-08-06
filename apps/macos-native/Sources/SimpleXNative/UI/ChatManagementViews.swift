@@ -4,30 +4,37 @@ struct ForwardMessagesView: View {
     @ObservedObject var model: AppModel
     let sourceChat: NativeChat
     @Environment(\.dismiss) private var dismiss
-    @State private var search = ""
+    @State private var searchText = ""
 
     var body: some View {
         NavigationStack {
-            List(destinations) { chat in
-                Button {
-                    model.forwardSelectedMessages(to: chat)
-                    dismiss()
-                } label: {
-                    HStack(spacing: 12) {
-                        ProfileAvatar(image: chat.image, name: chat.displayName, size: 36)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(chat.displayName)
-                            Text(chat.kind.toolbarSubtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+            List {
+                ForEach(destinations) { chat in
+                    Button {
+                        model.forwardSelectedMessages(to: chat)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 12) {
+                            ProfileAvatar(image: chat.image, name: chat.displayName, size: 36)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(chat.displayName)
+                                Text(chat.kind.toolbarSubtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Forward to \(chat.displayName)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Forward to \(chat.displayName)")
             }
-            .searchable(text: $search, prompt: "Search conversations")
+            .overlay {
+                if destinations.isEmpty && !searchText.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            }
+            .searchable(text: $searchText, placement: .toolbar, prompt: "Search chats")
             .navigationTitle("Forward Messages")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -41,7 +48,7 @@ struct ForwardMessagesView: View {
     private var destinations: [NativeChat] {
         model.chats.filter {
             $0.id != sourceChat.id && $0.kind.canSend
-                && (search.isEmpty || $0.displayName.localizedCaseInsensitiveContains(search))
+                && (searchText.isEmpty || $0.displayName.localizedCaseInsensitiveContains(searchText))
         }
     }
 }
@@ -51,6 +58,16 @@ struct ChatDetailsView: View {
     let chat: NativeChat
     @Environment(\.dismiss) private var dismiss
     @State private var destructiveConfirmation: DestructiveAction?
+    @State private var showEditGroupProfile = false
+    @State private var showGroupMembers = false
+    @State private var showGroupPreferences = false
+    @State private var showGroupLink = false
+    @State private var showSecurityCode = false
+    @State private var showWallpaperEditor = false
+    @State private var showContactPreferences = false
+    @State private var showGroupReports = false
+    @State private var connectionCode: String? = nil
+    @State private var connectionVerified = false
 
     var body: some View {
         NavigationStack {
@@ -76,7 +93,34 @@ struct ChatDetailsView: View {
                     }
                 }
 
+                if chat.kind == .group {
+                    Section("Group") {
+                        Button("Edit Group Profile…") { showEditGroupProfile = true }
+                        Button("Members…") { showGroupMembers = true }
+                        Button("Preferences…") { showGroupPreferences = true }
+                        Button("Group Link…") { showGroupLink = true }
+                        Button("View Reports…") { showGroupReports = true }
+                    }
+                }
+
+                if chat.kind == .direct {
+                    Section("Contact") {
+                        Button("Preferences…") { showContactPreferences = true }
+                    }
+                    Section("Security") {
+                        Button("Security Code…") {
+                            showSecurityCode = true
+                        }
+                    }
+                }
+
                 Section("Actions") {
+                    Button("Chat Wallpaper…") {
+                        showWallpaperEditor = true
+                    }
+                    Button("Tags…") {
+                        model.tagAssignmentChat = chat
+                    }
                     Button("Clear Messages…") { destructiveConfirmation = .clear }
                     if chat.kind == .group {
                         Button("Leave Group…", role: .destructive) { destructiveConfirmation = .leave }
@@ -111,6 +155,47 @@ struct ChatDetailsView: View {
                 destructiveConfirmation = nil
             }
             Button("Cancel", role: .cancel) { destructiveConfirmation = nil }
+        }
+        .sheet(isPresented: $showEditGroupProfile) {
+            GroupProfileEditView(model: model, chat: chat)
+        }
+        .sheet(isPresented: $showGroupMembers) {
+            GroupMembersView(model: model, chat: chat)
+        }
+        .sheet(isPresented: $showGroupPreferences) {
+            GroupPreferencesView(model: model, chat: chat)
+        }
+        .sheet(isPresented: $showGroupLink) {
+            GroupLinkView(model: model, chat: chat)
+        }
+        .sheet(isPresented: $showSecurityCode) {
+            VerifyCodeView(
+                contactName: chat.displayName,
+                connectionCode: connectionCode,
+                connectionVerified: connectionVerified,
+                verify: { code in
+                    Task {
+                        connectionVerified = try await model.verifyContactCode(contactID: chat.apiID, code: code)
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showWallpaperEditor) {
+            ChatWallpaperEditorView(chatID: chat.id, chatName: chat.displayName)
+        }
+        .sheet(isPresented: $showContactPreferences) {
+            ContactPreferencesView(model: model, chat: chat)
+        }
+        .sheet(isPresented: $showGroupReports) {
+            GroupReportsView(model: model, chat: chat)
+        }
+        .task {
+            if chat.kind == .direct {
+                if let info = try? await model.getContactConnectionInfo(contactID: chat.apiID) {
+                    connectionCode = info.connectionCode
+                    connectionVerified = info.verified
+                }
+            }
         }
     }
 
